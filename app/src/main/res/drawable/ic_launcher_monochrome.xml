@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon layer (Android 13+): one colour, the launcher tints it. The mark is a single
+     shape, so the themed icon is the same heart and nothing else. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:pathData="M54,72.7 C52.04,70.9 35.6,57.6 35.6,46.3 C35.6,40.2 40.4,35.4 46.2,35.4 C49.7,35.4 53.1,37 54,39.6 C54.9,37 58.3,35.4 61.8,35.4 C67.6,35.4 72.4,40.2 72.4,46.3 C72.4,57.6 55.96,70.9 54,72.7 Z"
+        android:fillColor="#FFFFFF" />
+</vector>

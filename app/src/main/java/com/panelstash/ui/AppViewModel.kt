@@ -1,0 +1,702 @@
+package com.panelstash.ui
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import coil3.request.ImageRequest
+import coil3.request.allowHardware
+import com.panelstash.PanelStashApp
+import com.panelstash.data.Preferences
+import com.panelstash.data.ReaderPage
+import com.panelstash.data.db.ChapterEntity
+import com.panelstash.data.db.ContinueRow
+import com.panelstash.data.db.DownloadState
+import com.panelstash.data.db.ManhwaEntity
+import com.panelstash.source.BrowseFilter
+import com.panelstash.source.BrowseSort
+import com.panelstash.source.PageQuality
+import com.panelstash.source.Source
+import com.panelstash.source.SourceError
+import com.panelstash.source.SourceGenre
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+private const val BROWSE_PAGE = 30
+private const val PREFETCH_AHEAD = 3
+
+/** Roughly the shape of one slice of a webtoon page, used when the source does not say. */
+const val FALLBACK_PAGE_ASPECT = 0.64f
+
+/** One title's automatic source switch: which sources have already been looked at for it. */
+private class MatchChain(val title: String) {
+    val tried = mutableSetOf<String>()
+}
+
+class AppViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val container = (application as PanelStashApp).container
+    private val library = container.library
+    private val settings = container.settings
+
+    private val stack = MutableStateFlow<List<Screen>>(listOf(Screen.Browse))
+    val screen: StateFlow<Screen> = stack
+        .map { it.last() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, Screen.Browse)
+
+    val canGoBack: StateFlow<Boolean> = stack
+        .map { it.size > 1 }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** Everything the user can change, observed by the theme and by settings. */
+    val preferences: StateFlow<Preferences> = settings.state
+
+    val continueReading: StateFlow<List<ContinueRow>> = library.observeContinueReading()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val followed: StateFlow<List<ManhwaEntity>> = library.observeFollowed()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val readLater: StateFlow<List<ManhwaEntity>> = library.observeReadLater()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val totalDownloadBytes: StateFlow<Long> = container.downloads.observeTotalBytes()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
+
+    val downloadGroups: StateFlow<List<DownloadGroup>> = container.downloads.observeAll()
+        .map { rows ->
+            rows.groupBy { it.manhwaId }.map { (manhwaId, chapters) ->
+                DownloadGroup(
+                    manhwaId = manhwaId,
+                    manhwaTitle = chapters.first().manhwaTitle,
+                    coverUrl = chapters.first().coverUrl,
+                    chapters = chapters.map {
+                        DownloadChapter(
+                            chapterId = it.chapterId,
+                            number = it.chapterNumber,
+                            title = it.chapterTitle,
+                            state = it.state,
+                            byteSize = it.byteSize,
+                        )
+                    },
+                )
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private val _browse = MutableStateFlow(BrowseState())
+    val browse: StateFlow<BrowseState> = _browse
+
+    private val _librarySection = MutableStateFlow(LibrarySection.FOLLOWING)
+    val librarySection: StateFlow<LibrarySection> = _librarySection
+
+    private val _chapterLoad = MutableStateFlow<ChapterLoad?>(null)
+    val chapterLoad: StateFlow<ChapterLoad?> = _chapterLoad
+
+    private val _pendingUndo = MutableStateFlow<PendingUndo?>(null)
+    val pendingUndo: StateFlow<PendingUndo?> = _pendingUndo
+
+    private val _search = MutableStateFlow(SearchState())
+    val search: StateFlow<SearchState> = _search
+
+    private val _reader = MutableStateFlow<ReaderState?>(null)
+    val reader: StateFlow<ReaderState?> = _reader
+
+    private val _message = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = _message
+
+    private var searchJob: Job? = null
+    private var readerJob: Job? = null
+    private var browseJob: Job? = null
+    private var matchJob: Job? = null
+    private var genresRequestedFor: String? = null
+    private var prefetchedUpTo = -1
+    private val chaptersInFlight = mutableSetOf<Long>()
+
+    /**
+     * The width the reader is drawing at, reported by the reader itself. Image requests are sized
+     * against it so a prefetch decodes the same bitmap the reader will ask for and the two share
+     * the memory cache. Falls back to the display until the reader has said.
+     */
+    @Volatile
+    private var viewportWidthPx = 0
+
+    /** Which sources a title has already been looked for, so an automatic switch cannot loop. */
+    private var matchChain: MatchChain? = null
+
+    init {
+        // Browse starts on the default source, and its capabilities come along: without them the
+        // first screen would offer no genre chips, no sort selector and an empty filter sheet
+        // until the user happened to switch source.
+        val source = library.source(settings.current.defaultSourceId) ?: library.installedSources().firstOrNull()
+        _browse.value = _browse.value.copy(
+            sourceId = source?.id ?: _browse.value.sourceId,
+            sourceName = source?.name ?: _browse.value.sourceName,
+            capabilities = source?.capabilities ?: _browse.value.capabilities,
+            sources = library.installedSources(),
+            sort = source?.capabilities?.sorts?.minByOrNull { it.ordinal } ?: BrowseSort.LATEST,
+            filter = settings.current.browseFilter,
+        )
+    }
+
+    fun clearMessage() {
+        _message.value = null
+    }
+
+    fun showMessage(text: String) {
+        _message.value = text
+    }
+
+    /** The display name of a source id, for headers and metadata lines. */
+    fun sourceName(sourceId: String): String =
+        library.source(sourceId)?.name ?: sourceId
+
+    // --- navigation -------------------------------------------------------
+
+    fun selectTab(screen: Screen) {
+        stack.value = listOf(screen)
+    }
+
+    fun push(screen: Screen) {
+        stack.value = stack.value + screen
+    }
+
+    /** Puts [screen] where the current one is, for a move the user did not ask to come back from. */
+    private fun replaceTop(screen: Screen) {
+        val current = stack.value
+        stack.value = if (current.isEmpty()) listOf(screen) else current.dropLast(1) + screen
+        if (current.lastOrNull() is Screen.Reader && screen !is Screen.Reader) _reader.value = null
+    }
+
+    fun back(): Boolean {
+        val current = stack.value
+        if (current.size <= 1) return false
+        stack.value = current.dropLast(1)
+        if (current.last() is Screen.Reader) _reader.value = null
+        return true
+    }
+
+    fun selectLibrarySection(section: LibrarySection) {
+        _librarySection.value = section
+    }
+
+    // --- preferences ------------------------------------------------------
+
+    fun updatePreferences(block: (Preferences) -> Preferences) = settings.update(block)
+
+    fun setDownloadQuality(quality: PageQuality) = settings.update { it.copy(downloadQuality = quality) }
+
+    fun downloadQuality(): PageQuality = settings.current.downloadQuality
+
+    fun installedSources(): List<Source> = library.installedSources()
+
+    fun clearImageCache() {
+        viewModelScope.launch(Dispatchers.IO) { container.clearImageCache() }
+        _message.value = "Image cache cleared"
+    }
+
+    /** Bytes held by the disposable image cache, for the settings screen. */
+    suspend fun imageCacheBytes(): Long {
+        val directory = getApplication<Application>().cacheDir.resolve("images")
+        return directory.walkBottomUp()
+            .filter { it.isFile }
+            .sumOf { it.length() }
+    }
+
+    // --- browse -----------------------------------------------------------
+
+    /** Called when the Browse tab becomes visible. Only does work when it has nothing to show. */
+    fun primeBrowse() {
+        loadGenres()
+        if (_browse.value.manhwa.isEmpty() && !_browse.value.loading) refreshBrowse()
+    }
+
+    private fun loadGenres() {
+        val sourceId = _browse.value.sourceId
+        if (!_browse.value.capabilities.genres) return
+        if (genresRequestedFor == sourceId) return
+        genresRequestedFor = sourceId
+        viewModelScope.launch {
+            runCatching { library.genres(sourceId) }
+                .onSuccess { genres ->
+                    if (_browse.value.sourceId == sourceId) {
+                        _browse.value = _browse.value.copy(genres = genres)
+                    }
+                }
+                .onFailure { genresRequestedFor = null }
+        }
+    }
+
+    fun setBrowseSource(sourceId: String) {
+        if (_browse.value.sourceId == sourceId) return
+        val source = library.source(sourceId) ?: return
+        genresRequestedFor = null
+        _browse.value = _browse.value.copy(
+            sourceId = source.id,
+            sourceName = source.name,
+            capabilities = source.capabilities,
+            sources = library.installedSources(),
+            // The capabilities are a set, whose order is not the order the UI shows: pick the
+            // same sort the screen would start on, not whatever the set happened to yield.
+            sort = source.capabilities.sorts.minByOrNull { it.ordinal } ?: BrowseSort.LATEST,
+            tagId = null,
+            tagName = null,
+            genres = emptyList(),
+            manhwa = emptyList(),
+            endReached = false,
+            error = null,
+        )
+        primeBrowse()
+    }
+
+    fun setBrowseSort(sort: BrowseSort) {
+        if (_browse.value.sort == sort) return
+        _browse.value = _browse.value.copy(sort = sort, manhwa = emptyList(), endReached = false, error = null)
+        refreshBrowse()
+    }
+
+    fun setBrowseGenre(genre: SourceGenre?) {
+        if (_browse.value.tagId == genre?.id) return
+        _browse.value = _browse.value.copy(
+            tagId = genre?.id,
+            tagName = genre?.name,
+            manhwa = emptyList(),
+            endReached = false,
+            error = null,
+        )
+        refreshBrowse()
+    }
+
+    fun setBrowseFilter(filter: BrowseFilter) {
+        settings.update { it.copy(browseFilter = filter) }
+        _browse.value = _browse.value.copy(filter = filter, manhwa = emptyList(), endReached = false, error = null)
+        refreshBrowse()
+    }
+
+    fun refreshBrowse() {
+        val requestedSort = _browse.value.sort
+        val requestedTag = _browse.value.tagId
+        val requestedSource = _browse.value.sourceId
+        val requestedFilter = _browse.value.filter
+        browseJob?.cancel()
+        _browse.value = _browse.value.copy(loading = true, error = null)
+        browseJob = viewModelScope.launch {
+            runCatching {
+                library.browse(
+                    sourceId = requestedSource,
+                    sort = requestedSort,
+                    tagId = requestedTag,
+                    filter = requestedFilter,
+                    offset = 0,
+                    limit = BROWSE_PAGE,
+                )
+            }
+                .onSuccess { items ->
+                    if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                        _browse.value = _browse.value.copy(
+                            manhwa = items,
+                            loading = false,
+                            endReached = items.size < BROWSE_PAGE,
+                            error = null,
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                        _browse.value = _browse.value.copy(loading = false, error = friendly(error))
+                    }
+                }
+        }
+    }
+
+    fun loadMoreBrowse() {
+        val state = _browse.value
+        if (state.loading || state.loadingMore || state.endReached) return
+        val requestedSort = state.sort
+        val requestedTag = state.tagId
+        val requestedSource = state.sourceId
+        val requestedFilter = state.filter
+        val offset = state.manhwa.size
+        _browse.value = state.copy(loadingMore = true)
+        viewModelScope.launch {
+            runCatching {
+                library.browse(requestedSource, requestedSort, requestedTag, requestedFilter, offset, BROWSE_PAGE)
+            }
+                .onSuccess { items ->
+                    if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                        val current = _browse.value
+                        _browse.value = if (current.manhwa.size == offset) {
+                            current.copy(
+                                manhwa = current.manhwa + items,
+                                loadingMore = false,
+                                endReached = items.size < BROWSE_PAGE,
+                            )
+                        } else {
+                            current.copy(loadingMore = false)
+                        }
+                    }
+                }
+                .onFailure { error ->
+                    if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                        _browse.value = _browse.value.copy(loadingMore = false, error = friendly(error))
+                    }
+                }
+        }
+    }
+
+    private fun isCurrent(
+        sourceId: String,
+        sort: BrowseSort,
+        tagId: String?,
+        filter: BrowseFilter,
+    ): Boolean {
+        val state = _browse.value
+        return state.sourceId == sourceId && state.sort == sort && state.tagId == tagId && state.filter == filter
+    }
+
+    // --- library ----------------------------------------------------------
+
+    fun openProfile(manhwaId: Long) {
+        push(Screen.Profile(manhwaId))
+        ensureChapters(manhwaId)
+    }
+
+    /**
+     * Loads the chapter list the first time a manhwa is opened, and records why it failed so the
+     * profile can show it instead of an empty list.
+     */
+    fun ensureChapters(manhwaId: Long) {
+        if (!chaptersInFlight.add(manhwaId)) return
+        viewModelScope.launch {
+            try {
+                if (library.chaptersFor(manhwaId).isNotEmpty()) return@launch
+                _chapterLoad.value = ChapterLoad(manhwaId, loading = true)
+                runCatching { library.refreshChapters(manhwaId) }
+                    .onSuccess {
+                        _chapterLoad.value = ChapterLoad(manhwaId, loading = false)
+                        openOnAnotherSource(manhwaId)
+                    }
+                    .onFailure {
+                        _chapterLoad.value = ChapterLoad(manhwaId, loading = false, error = friendly(it))
+                    }
+            } finally {
+                chaptersInFlight.remove(manhwaId)
+            }
+        }
+    }
+
+    fun refreshChapters(manhwaId: Long) {
+        if (!chaptersInFlight.add(manhwaId)) return
+        _chapterLoad.value = ChapterLoad(manhwaId, loading = true)
+        viewModelScope.launch {
+            try {
+                runCatching { library.refreshChapters(manhwaId) }
+                    .onSuccess {
+                        _chapterLoad.value = ChapterLoad(manhwaId, loading = false)
+                        openOnAnotherSource(manhwaId)
+                    }
+                    .onFailure {
+                        _chapterLoad.value = ChapterLoad(manhwaId, loading = false, error = friendly(it))
+                    }
+            } finally {
+                chaptersInFlight.remove(manhwaId)
+            }
+        }
+    }
+
+    /**
+     * A title can be perfectly present on a source and still have nothing to read: MangaDex keeps
+     * licensed series and drops their chapters, and a scanlation site can coin-lock everything it
+     * publishes. So when a title turns out to be unreadable, the same title is opened on another
+     * installed source straight away, rather than asking the reader to go and look for it.
+     *
+     * The sources already tried for this title are remembered, so two sources that both lack
+     * chapters cannot pass the reader between each other, and the profile that showed the
+     * unreadable copy is replaced rather than buried under the readable one.
+     */
+    private fun openOnAnotherSource(manhwaId: Long) {
+        matchJob?.cancel()
+        matchJob = viewModelScope.launch {
+            try {
+                val manhwa = container.db.manhwaDao().byId(manhwaId) ?: return@launch
+                if (library.chaptersFor(manhwaId).isNotEmpty()) return@launch
+                // The search runs over every other source, which takes a moment; the profile says
+                // so rather than claiming, in the meantime, that nothing anywhere has the title.
+                _chapterLoad.value = ChapterLoad(manhwaId, matching = true)
+                val chain = matchChain?.takeIf { it.title == manhwa.title } ?: MatchChain(manhwa.title)
+                matchChain = chain
+                chain.tried += manhwa.sourceId
+                val match = runCatching { library.findOnOtherSource(manhwa.title, chain.tried) }
+                    .getOrNull()
+                    ?: return@launch
+                val (source, target) = match
+                chain.tried += source.id
+                val localId = runCatching { library.openManhwa(source.id, target.remoteId) }.getOrNull()
+                    ?: return@launch
+                _message.value = "Opened on ${source.name}"
+                replaceTop(Screen.Profile(localId))
+                ensureChapters(localId)
+            } finally {
+                val load = _chapterLoad.value
+                if (load?.manhwaId == manhwaId && load.matching) {
+                    _chapterLoad.value = load.copy(matching = false)
+                }
+            }
+        }
+    }
+
+    fun profile(manhwaId: Long): Flow<ProfileState?> = combine(
+        library.observeManhwa(manhwaId),
+        library.observeChapters(manhwaId),
+        container.downloads.observeForManhwa(manhwaId),
+        container.db.resumeDao().observePoint(manhwaId),
+    ) { manhwa, chapters, downloads, resume ->
+        if (manhwa == null) {
+            null
+        } else {
+            ProfileState(
+                manhwa = manhwa,
+                chapters = chapters,
+                downloads = downloads.associateBy { it.chapterId },
+                resumeChapterId = resume?.chapterId,
+                resumePage = resume?.pageIndex ?: 0,
+            )
+        }
+    }
+
+    fun followedState(manhwaId: Long): Flow<Boolean> = library.observeFollowedState(manhwaId)
+
+    fun readLaterState(manhwaId: Long): Flow<Boolean> = library.observeReadLaterState(manhwaId)
+
+    fun toggleFollow(manhwaId: Long, followed: Boolean) {
+        viewModelScope.launch {
+            library.setFollowed(manhwaId, followed)
+            _message.value = if (followed) "Following" else "Unfollowed"
+        }
+    }
+
+    fun toggleReadLater(manhwaId: Long, marked: Boolean) {
+        viewModelScope.launch {
+            library.setReadLater(manhwaId, marked)
+            _message.value = if (marked) "Saved for later" else "Removed from later"
+        }
+    }
+
+    // --- search -----------------------------------------------------------
+
+    fun setQuery(query: String) {
+        _search.value = _search.value.copy(query = query)
+    }
+
+    fun runSearch(query: String) {
+        _search.value = _search.value.copy(query = query, loading = true, message = null)
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            runCatching { library.search(_browse.value.sourceId, query) }
+                .onSuccess { results ->
+                    _search.value = _search.value.copy(results = results, loading = false)
+                }
+                .onFailure { error ->
+                    _search.value = _search.value.copy(loading = false, message = friendly(error))
+                }
+        }
+    }
+
+    // --- reader -----------------------------------------------------------
+
+    /** The chapter list of whatever the reader has open, for switching without leaving it. */
+    fun chapters(manhwaId: Long): Flow<List<ChapterEntity>> = library.observeChapters(manhwaId)
+
+    /** Replaces the open chapter with another one from the same manhwa. */
+    fun switchChapter(chapterId: Long) {
+        if (_reader.value?.chapter?.id == chapterId) return
+        stack.value = stack.value.dropLast(1)
+        openChapter(chapterId, 0)
+    }
+
+    fun openChapter(chapterId: Long, pageIndex: Int = 0) {
+        push(Screen.Reader(chapterId))
+        readerJob?.cancel()
+        readerJob = viewModelScope.launch {
+            _reader.value = null
+            prefetchedUpTo = -1
+            val chapter = library.chapter(chapterId)
+            val manhwa = chapter?.let { container.db.manhwaDao().byId(it.manhwaId) }
+            if (chapter == null || manhwa == null) {
+                _message.value = "Unavailable"
+                back()
+                return@launch
+            }
+            val saved = library.resume(manhwa.id)
+            val start = when {
+                pageIndex > 0 -> pageIndex
+                saved?.chapterId == chapter.id -> saved.pageIndex
+                else -> 0
+            }
+            runCatching { container.reader.pages(chapter, manhwa) }
+                .onSuccess { pages ->
+                    // Sources that report page counts only when a chapter opens store them here,
+                    // so resume, progress and clamping stay accurate.
+                    if (pages.size != chapter.pageCount) library.updatePageCount(chapter.id, pages.size)
+                    val fresh = library.chapter(chapter.id) ?: chapter
+                    val resolved = start.coerceIn(0, maxOf(0, pages.size - 1))
+                    _reader.value = ReaderState(
+                        manhwa = manhwa,
+                        chapter = fresh,
+                        pages = pages,
+                        startPage = resolved,
+                        nextChapterId = library.nextChapter(manhwa.id, chapter.id)?.id,
+                        previousChapterId = library.previousChapter(manhwa.id, chapter.id)?.id,
+                    )
+                    prefetch(pages, resolved)
+                }
+                .onFailure { error ->
+                    _message.value = friendly(error)
+                    back()
+                }
+        }
+    }
+
+    /** Called by the reader, which is the only part of the app that knows its window's width. */
+    fun setViewportWidth(widthPx: Int) {
+        if (widthPx > 0) viewportWidthPx = widthPx
+    }
+
+    /**
+     * Warm the next few pages so scrolling does not wait on the network. Downloads are already
+     * local, and the requests are sized like the reader's own, so a hit lands in the memory cache
+     * and a miss still lands in the disk cache the reader will read from.
+     *
+     * Called again as the reader moves down the chapter: the high-water mark makes the repeat
+     * calls free, and a jump forward still warms the pages beyond it.
+     */
+    fun prefetch(pages: List<ReaderPage>, from: Int) {
+        val start = from + 1
+        val end = (start + PREFETCH_AHEAD).coerceAtMost(pages.size)
+        if (start >= end || start < prefetchedUpTo) return
+        prefetchedUpTo = end
+        val width = if (viewportWidthPx > 0) viewportWidthPx else container.screenWidthPx()
+        viewModelScope.launch {
+            for (index in start until end) {
+                val page = pages[index] as? ReaderPage.Remote ?: continue
+                val height = (width / (page.aspectOrNull() ?: FALLBACK_PAGE_ASPECT)).toInt()
+                container.imageLoader.enqueue(
+                    ImageRequest.Builder(getApplication())
+                        .data(page.url)
+                        .size(width, height)
+                        .allowHardware(true)
+                        .build(),
+                )
+            }
+        }
+    }
+
+    fun openNeighbour(chapterId: Long?) {
+        if (chapterId == null) {
+            _message.value = "Nothing there"
+            return
+        }
+        stack.value = stack.value.dropLast(1)
+        openChapter(chapterId, 0)
+    }
+
+    fun saveProgress(manhwaId: Long, chapterId: Long, pageIndex: Int) {
+        viewModelScope.launch { library.saveResume(manhwaId, chapterId, pageIndex) }
+    }
+
+    fun markFinished(chapterId: Long) {
+        viewModelScope.launch { library.markRead(chapterId, read = true) }
+    }
+
+    /** Manual read/unread from the chapter list, without opening the chapter. */
+    fun setChapterRead(chapterId: Long, read: Boolean) {
+        viewModelScope.launch { library.markRead(chapterId, read) }
+    }
+
+    /** Called when the end-of-chapter circle completes. Resume moves to the next chapter. */
+    fun advance(chapterId: Long) {
+        val state = _reader.value ?: return
+        viewModelScope.launch {
+            library.markRead(chapterId, read = true)
+            val next = library.nextChapter(state.manhwa.id, chapterId)
+            if (next == null) {
+                _message.value = "You are all caught up"
+                stack.value = stack.value.dropLast(1)
+                _reader.value = null
+            } else {
+                library.saveResume(state.manhwa.id, next.id, 0)
+                stack.value = stack.value.dropLast(1)
+                openChapter(next.id, 0)
+            }
+        }
+    }
+
+    // --- downloads --------------------------------------------------------
+
+    fun download(chapters: List<ChapterEntity>, manhwa: ManhwaEntity, metered: Boolean) {
+        val quality = settings.current.downloadQuality
+        viewModelScope.launch {
+            for (chapter in chapters) {
+                container.downloads.markQueued(manhwa.id, chapter.id, quality, metered)
+            }
+            container.scheduler.enqueue(manhwa, chapters, quality, metered)
+            _message.value = if (chapters.size == 1) {
+                "Downloading chapter ${chapters.first().numberText}"
+            } else {
+                "Downloading ${chapters.size} chapters"
+            }
+        }
+    }
+
+    fun deleteDownload(chapterId: Long, number: String? = null) {
+        viewModelScope.launch {
+            container.scheduler.cancel(chapterId)
+            container.reader.invalidate(chapterId)
+            val undoable = container.downloads.delete(chapterId, keepForUndo = true)
+            _pendingUndo.value = if (undoable) {
+                PendingUndo(
+                    chapterId = chapterId,
+                    label = number?.let { "Chapter $it deleted" } ?: "Download deleted",
+                )
+            } else {
+                null
+            }
+        }
+    }
+
+    fun undoDelete() {
+        val pending = _pendingUndo.value ?: return
+        _pendingUndo.value = null
+        viewModelScope.launch {
+            container.reader.invalidate(pending.chapterId)
+            _message.value = if (container.downloads.restore(pending.chapterId)) {
+                "Restored"
+            } else {
+                "Could not restore"
+            }
+        }
+    }
+
+    /** The undo window closed: the moved-aside copy is now really gone. */
+    fun clearUndo() {
+        if (_pendingUndo.value == null) return
+        _pendingUndo.value = null
+        container.downloads.discardPending()
+    }
+
+    private fun friendly(error: Throwable): String = when (error) {
+        is SourceError.RateLimited -> "Source asked us to slow down"
+        is SourceError.Banned -> "Source paused requests for now"
+        is SourceError.Transient -> "Source did not answer"
+        is SourceError.Unavailable -> "Not available on this source"
+        is SourceError.Offline -> "No connection"
+        else -> "Something went wrong"
+    }
+}

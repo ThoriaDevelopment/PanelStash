@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="330" viewBox="0 0 1600 330">
+  <rect width="1600" height="330" fill="#07070A"/>
+
+  <text x="48" y="64" font-family="Segoe UI" font-size="34" font-weight="600" fill="#FFFFFF">Five sources in 0.1</text>
+  <text x="48" y="102" font-family="Segoe UI" font-size="22" font-weight="400" fill="#8C93A3">Every source has its own catalogue. Pick one per search and switch whenever you want.</text>
+
+  <g fill="#101116" stroke="#22242C">
+    <rect x="48" y="148" width="288" height="116" rx="22"/>
+    <rect x="352" y="148" width="288" height="116" rx="22"/>
+    <rect x="656" y="148" width="288" height="116" rx="22"/>
+    <rect x="960" y="148" width="288" height="116" rx="22"/>
+    <rect x="1264" y="148" width="288" height="116" rx="22"/>
+  </g>
+
+  <g font-family="Segoe UI">
+    <text x="76" y="198" font-size="24" font-weight="600" fill="#FFFFFF">MangaDex</text>
+    <text x="76" y="232" font-size="17" font-weight="400" fill="#8C93A3">Documented API</text>
+    <text x="380" y="198" font-size="24" font-weight="600" fill="#FFFFFF">Vortex Scans</text>
+    <text x="380" y="232" font-size="17" font-weight="400" fill="#8C93A3">JSON endpoints</text>
+    <text x="684" y="198" font-size="24" font-weight="600" fill="#FFFFFF">Nyx Scans</text>
+    <text x="684" y="232" font-size="17" font-weight="400" fill="#8C93A3">JSON endpoints</text>
+    <text x="988" y="198" font-size="24" font-weight="600" fill="#FFFFFF">Orion Scans</text>
+    <text x="988" y="232" font-size="17" font-weight="400" fill="#8C93A3">JSON API, HTML reader</text>
+    <text x="1292" y="198" font-size="24" font-weight="600" fill="#FFFFFF">Kayn Scans</text>
+    <text x="1292" y="232" font-size="17" font-weight="400" fill="#8C93A3">JSON endpoints</text>
+  </g>
+</svg>

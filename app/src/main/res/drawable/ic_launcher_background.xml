@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The adaptive background: the brand gradient, pink at the top left running to purple at the
+     bottom right, the same direction as the mark itself. A gradient shape fills the whole 108dp
+     canvas, so whatever the launcher's mask cuts away stays on colour. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:angle="315"
+                android:startColor="#FB4B87"
+                android:centerColor="#D45EC4"
+                android:endColor="#A97BFF"
+                android:type="linear" />
+        </shape>
+    </item>
+</layer-list>

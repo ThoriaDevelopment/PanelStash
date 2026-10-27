@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="580" viewBox="0 0 1600 580">
+  <defs>
+    <linearGradient id="brandRow" gradientUnits="userSpaceOnUse" x1="430" y1="0" x2="1136" y2="0">
+      <stop offset="0" stop-color="#FB4B87"/>
+      <stop offset="0.5" stop-color="#D45EC4"/>
+      <stop offset="1" stop-color="#A97BFF"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="580" fill="#07070A"/>
+
+  <text x="80" y="94" font-family="Segoe UI" font-size="44" font-weight="600" fill="#FFFFFF">Browse filters, and which sources apply them</text>
+  <text x="80" y="142" font-family="Segoe UI" font-size="26" font-weight="400" fill="#8C93A3">Each source declares what it can filter, so the sheet never offers a control that does nothing.</text>
+
+  <!-- Column headers name the source each block belongs to, so the pattern is readable. -->
+  <g font-family="Segoe UI" font-size="22" font-weight="500" fill="#6C7382" text-anchor="middle">
+    <text x="495" y="208">MD</text>
+    <text x="639" y="208">VS</text>
+    <text x="783" y="208">NS</text>
+    <text x="927" y="208">OS</text>
+    <text x="1071" y="208">KS</text>
+  </g>
+
+  <g font-family="Segoe UI" font-size="28" font-weight="500" fill="#E8EAF0">
+    <text x="80" y="245">Reading status</text>
+    <text x="80" y="307">Genres</text>
+    <text x="80" y="369">Release year</text>
+    <text x="80" y="431">Safe rating only</text>
+    <text x="80" y="493">Excluded genres</text>
+  </g>
+
+  <g fill="#16171C">
+    <rect x="430" y="220" width="130" height="34" rx="10"/><rect x="574" y="220" width="130" height="34" rx="10"/><rect x="718" y="220" width="130" height="34" rx="10"/><rect x="862" y="220" width="130" height="34" rx="10"/><rect x="1006" y="220" width="130" height="34" rx="10"/>
+    <rect x="430" y="282" width="130" height="34" rx="10"/><rect x="574" y="282" width="130" height="34" rx="10"/><rect x="718" y="282" width="130" height="34" rx="10"/><rect x="862" y="282" width="130" height="34" rx="10"/><rect x="1006" y="282" width="130" height="34" rx="10"/>
+    <rect x="430" y="344" width="130" height="34" rx="10"/><rect x="574" y="344" width="130" height="34" rx="10"/><rect x="718" y="344" width="130" height="34" rx="10"/><rect x="862" y="344" width="130" height="34" rx="10"/><rect x="1006" y="344" width="130" height="34" rx="10"/>
+    <rect x="430" y="406" width="130" height="34" rx="10"/><rect x="574" y="406" width="130" height="34" rx="10"/><rect x="718" y="406" width="130" height="34" rx="10"/><rect x="862" y="406" width="130" height="34" rx="10"/><rect x="1006" y="406" width="130" height="34" rx="10"/>
+    <rect x="430" y="468" width="130" height="34" rx="10"/><rect x="574" y="468" width="130" height="34" rx="10"/><rect x="718" y="468" width="130" height="34" rx="10"/><rect x="862" y="468" width="130" height="34" rx="10"/><rect x="1006" y="468" width="130" height="34" rx="10"/>
+  </g>
+
+  <!-- Filled cells match SourceCapabilities in the sources themselves: status is everywhere,
+       genres are MangaDex and Kayn, and the remaining three filters are MangaDex only. -->
+  <g fill="url(#brandRow)">
+    <rect x="430" y="220" width="130" height="34" rx="10"/><rect x="574" y="220" width="130" height="34" rx="10"/><rect x="718" y="220" width="130" height="34" rx="10"/><rect x="862" y="220" width="130" height="34" rx="10"/><rect x="1006" y="220" width="130" height="34" rx="10"/>
+    <rect x="430" y="282" width="130" height="34" rx="10"/><rect x="1006" y="282" width="130" height="34" rx="10"/>
+    <rect x="430" y="344" width="130" height="34" rx="10"/>
+    <rect x="430" y="406" width="130" height="34" rx="10"/>
+    <rect x="430" y="468" width="130" height="34" rx="10"/>
+  </g>
+
+  <g font-family="Segoe UI" font-size="24" font-weight="500" fill="#8C93A3">
+    <text x="1176" y="245">5 of 5</text>
+    <text x="1176" y="307">2 of 5</text>
+    <text x="1176" y="369">1 of 5</text>
+    <text x="1176" y="431">1 of 5</text>
+    <text x="1176" y="493">1 of 5</text>
+  </g>
+
+  <text x="80" y="554" font-family="Segoe UI" font-size="21" font-weight="400" fill="#5D6373"><tspan>MD MangaDex</tspan><tspan dx="28">VS Vortex Scans</tspan><tspan dx="28">NS Nyx Scans</tspan><tspan dx="28">OS Orion Scans</tspan><tspan dx="28">KS Kayn Scans</tspan></text>
+</svg>

@@ -1,0 +1,43 @@
+# Build output. Gradle writes here, and every file in it can be recreated.
+.gradle/
+build/
+.kotlin/
+captures/
+*.hprof
+*.log
+
+# The Android SDK location differs on every machine, so it stays local.
+local.properties
+
+# IDE settings.
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Signing keys. A published key defeats the point of signing, so these
+# never leave the machine they were made on.
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Built packages. Releases get attached to a GitHub release, not committed.
+*.apk
+*.aab
+*.ap_
+dist/
+
+# Working notes and scratch research. These are for the maintainer only and
+# have no place in a public repository.
+docs/internal/
+.freebuff/
+
+# Editor and OS clutter.
+.DS_Store
+Thumbs.db
+*~
+*.orig
+*.rej
