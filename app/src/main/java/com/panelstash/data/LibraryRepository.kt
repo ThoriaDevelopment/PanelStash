@@ -13,8 +13,18 @@ import com.panelstash.source.Source
 import com.panelstash.source.SourceGenre
 import com.panelstash.source.SourceManhwa
 import com.panelstash.source.SourceRegistry
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+
+/** One aggregate page: what was found, where each source resumes, and whether all are done. */
+data class BrowsePage(
+    val items: List<ManhwaEntity>,
+    val nextOffsets: Map<String, Int>,
+    val exhausted: Boolean,
+)
 
 class LibraryRepository(
     private val sources: SourceRegistry,
@@ -47,6 +57,63 @@ class LibraryRepository(
             source.search(query = query, offset = 0, limit = 30)
         }
         return results.mapNotNull { upsert(it, source.id) }
+    }
+
+    /**
+     * Search every installed source at once. A source that fails is skipped rather than failing
+     * the whole search: one dead site should not hide results from the other four.
+     */
+    suspend fun searchAll(query: String): List<ManhwaEntity> = coroutineScope {
+        val pages = sources.all.map { source ->
+            async {
+                source to runCatching {
+                    if (query.isBlank()) {
+                        source.browse(BrowseSort.LATEST, null, BrowseFilter.None, 0, 30)
+                    } else {
+                        source.search(query, 0, 30)
+                    }
+                }
+            }
+        }.awaitAll()
+
+        val firstError = pages.firstNotNullOfOrNull { it.second.exceptionOrNull() }
+        val found = pages.flatMap { (source, result) ->
+            result.getOrDefault(emptyList()).mapNotNull { upsert(it, source.id) }
+        }
+        if (found.isEmpty()) firstError?.let { throw it }
+        found
+    }
+
+    /**
+     * The same aggregate page, but over the browse catalogue. Each source keeps its own offset,
+     * so "load more" advances all of them rather than replaying the first page forever.
+     */
+    suspend fun browseAll(
+        sort: BrowseSort,
+        tagId: String?,
+        filter: BrowseFilter,
+        offsets: Map<String, Int>,
+        limit: Int,
+    ): BrowsePage = coroutineScope {
+        val pages = sources.all.map { source ->
+            val offset = offsets[source.id] ?: 0
+            async {
+                Triple(source, offset, runCatching { source.browse(sort, tagId, filter, offset, limit) })
+            }
+        }.awaitAll()
+
+        val firstError = pages.firstNotNullOfOrNull { it.third.exceptionOrNull() }
+        val nextOffsets = offsets.toMutableMap()
+        val exhausted = pages.all { (_, _, result) ->
+            result.isSuccess && result.getOrDefault(emptyList()).size < limit
+        }
+        val items = pages.flatMap { (source, offset, result) ->
+            val rows = result.getOrDefault(emptyList())
+            if (result.isSuccess) nextOffsets[source.id] = offset + rows.size
+            rows.mapNotNull { upsert(it, source.id) }
+        }
+        if (items.isEmpty()) firstError?.let { throw it }
+        BrowsePage(items = items, nextOffsets = nextOffsets, exhausted = exhausted)
     }
 
     /** A page of the browse catalogue, stored locally so it can be opened straight away. */
@@ -101,7 +168,7 @@ class LibraryRepository(
     }
 
     suspend fun previousChapter(manhwaId: Long, chapterId: Long): ChapterEntity? {
-        val all = chapterDao.listForManhwa(manhwaId)
+        val all = chapterDao.listForManhwa(manhwaId).filter { it.externalUrl == null }
         val index = all.indexOfFirst { it.id == chapterId }
         return if (index > 0) all[index - 1] else null
     }
@@ -137,6 +204,7 @@ class LibraryRepository(
                         title = chapter.title,
                         language = chapter.language,
                         pageCount = chapter.pageCount,
+                        externalUrl = chapter.externalUrl,
                     ),
                 )
             } else {
@@ -146,6 +214,7 @@ class LibraryRepository(
                         sortKey = chapter.sortKey,
                         title = chapter.title,
                         pageCount = chapter.pageCount,
+                        externalUrl = chapter.externalUrl,
                     ),
                 )
             }
@@ -200,9 +269,9 @@ class LibraryRepository(
 
     suspend fun firstChapter(manhwaId: Long): ChapterEntity? = chapterDao.firstChapter(manhwaId)
 
-    /** The next chapter in reading order, or null at the end of a series. */
+    /** The next readable chapter in reading order, or null at the end of a series. */
     suspend fun nextChapter(manhwaId: Long, chapterId: Long): ChapterEntity? {
-        val all = chapterDao.listForManhwa(manhwaId)
+        val all = chapterDao.listForManhwa(manhwaId).filter { it.externalUrl == null }
         val index = all.indexOfFirst { it.id == chapterId }
         return if (index >= 0 && index + 1 < all.size) all[index + 1] else null
     }
@@ -212,7 +281,7 @@ class LibraryRepository(
         val saved = resumeDao.get(manhwaId)
         if (saved != null) {
             val chapter = chapterDao.byId(saved.chapterId)
-            if (chapter != null) {
+            if (chapter != null && chapter.externalUrl == null) {
                 val page = saved.pageIndex.coerceIn(0, maxOf(0, chapter.pageCount - 1))
                 return chapter to page
             }

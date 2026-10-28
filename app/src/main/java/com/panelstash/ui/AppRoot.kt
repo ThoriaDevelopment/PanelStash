@@ -1,5 +1,8 @@
 package com.panelstash.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
@@ -28,6 +31,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -35,8 +39,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.panelstash.ui.screens.BrowseScreen
 import com.panelstash.ui.screens.LibraryScreen
@@ -48,6 +54,12 @@ import com.panelstash.ui.theme.AppCanvas
 import com.panelstash.ui.theme.Palette
 import com.panelstash.ui.theme.PanelStashTheme
 import kotlinx.coroutines.delay
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 private data class Tab(val screen: Screen, val label: String, val glyph: Glyph)
 
@@ -70,6 +82,18 @@ fun AppRoot(vm: AppViewModel = viewModel()) {
 
 @Composable
 private fun AppContent(vm: AppViewModel) {
+    val view = LocalView.current
+    // The system bar icons are the platform's, not Compose's, so they need telling when the
+    // user switches between a dark and a light canvas while the app is running.
+    SideEffect {
+        val window = view.context.findActivity()?.window ?: return@SideEffect
+        WindowCompat.getInsetsController(window, view).apply {
+            // True means a light background, so the platform draws dark icons.
+            isAppearanceLightStatusBars = Palette.IsLight
+            isAppearanceLightNavigationBars = Palette.IsLight
+        }
+    }
+
     val screen by vm.screen.collectAsState()
     val message by vm.message.collectAsState()
     val undo by vm.pendingUndo.collectAsState()

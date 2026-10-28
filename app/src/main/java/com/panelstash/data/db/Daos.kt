@@ -104,7 +104,10 @@ interface ChapterDao {
     @Query("SELECT COUNT(*) FROM chapter WHERE manhwaId = :manhwaId AND readAt IS NOT NULL")
     fun observeReadCount(manhwaId: Long): Flow<Int>
 
-    @Query("SELECT * FROM chapter WHERE manhwaId = :manhwaId ORDER BY sortKey ASC LIMIT 1")
+    @Query(
+        "SELECT * FROM chapter WHERE manhwaId = :manhwaId AND externalUrl IS NULL " +
+            "ORDER BY sortKey ASC LIMIT 1",
+    )
     suspend fun firstChapter(manhwaId: Long): ChapterEntity?
 }
 

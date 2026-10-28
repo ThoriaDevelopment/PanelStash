@@ -35,11 +35,13 @@ class MangaDexApiTest {
     }
 
     @Test
-    fun `chapter feed asks for one language, one offset, and no external chapters`() {
+    fun `chapter feed asks for one language, one offset, and keeps external chapters`() {
         val params = MangaDexApi.chapterFeedParams("en", 500)
         assertEquals(listOf<Any>("en"), params.values("translatedLanguage[]"))
         assertEquals(listOf<Any>(500), params.values("offset"))
-        assertEquals(listOf<Any>(0), params.values("includeExternalUrl"))
+        // Licensed English chapters live behind externalUrl; filtering them out makes a title
+        // look as if it has no English translation at all.
+        assertTrue(params.none { it.first == "includeExternalUrl" })
     }
 
     @Test

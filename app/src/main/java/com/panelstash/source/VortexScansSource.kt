@@ -90,7 +90,9 @@ class VortexScansSource(
         if (parts.size != 2) throw SourceError.Unavailable()
         val body = request("/api/chapter") {
             parameter("mangaslug", parts[0])
-            parameter("chapterSlug", parts[1])
+            // The endpoint spells both parameters in lower case. A camel-cased `chapterSlug`
+            // is answered with HTTP 400, which is why chapters used to open to a blank reader.
+            parameter("chapterslug", parts[1])
         }
         val chapter = decode(VortexChapterPageResponse.serializer(), body).chapter
             ?: throw SourceError.Unavailable()
@@ -175,7 +177,7 @@ private fun VortexPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
     status = seriesStatus,
 )
 
-private fun VortexChapterDto.toSourceChapter(mangaSlug: String): SourceChapter? {
+internal fun VortexChapterDto.toSourceChapter(mangaSlug: String): SourceChapter? {
     val number = number ?: return null
     val text = formatNumber(number)
     return SourceChapter(
@@ -187,8 +189,10 @@ private fun VortexChapterDto.toSourceChapter(mangaSlug: String): SourceChapter? 
         // The API reports page counts only when a chapter is opened, so the count is stored
         // after the first read.
         pageCount = 0,
-        // Coin-locked chapters have no readable pages here.
-        externalOnly = isPermanentlyLocked,
+        // A priced chapter is coin-locked, including an early-access one that is permanent-only
+        // false but not yet free. Without an account its reader request answers locked/not
+        // accessible, so listing it as readable would open a chapter that cannot load.
+        externalOnly = isPermanentlyLocked || price > 0,
     )
 }
 

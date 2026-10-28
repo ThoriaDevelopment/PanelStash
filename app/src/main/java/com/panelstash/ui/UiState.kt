@@ -10,6 +10,9 @@ import com.panelstash.source.Source
 import com.panelstash.source.SourceCapabilities
 import com.panelstash.source.SourceGenre
 
+/** A source id that means "every installed source", used by Browse and Search. */
+const val ALL_SOURCES = "all"
+
 /**
  * Two top-level destinations. Search, a manhwa profile, the reader and settings are pushed on top
  * of whichever tab opened them.
@@ -69,6 +72,7 @@ data class ProfileState(
 
 data class SearchState(
     val query: String = "",
+    val sourceId: String = ALL_SOURCES,
     val results: List<ManhwaEntity> = emptyList(),
     val loading: Boolean = false,
     val message: String? = null,

@@ -9,15 +9,19 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.panelstash.data.db.ManhwaEntity
+import com.panelstash.ui.ALL_SOURCES
 import com.panelstash.ui.AppViewModel
+import com.panelstash.ui.Chip
 import com.panelstash.ui.EmptyState
 import com.panelstash.ui.Glyph
 import com.panelstash.ui.ListRow
@@ -28,6 +32,7 @@ import com.panelstash.ui.TopBar
 @Composable
 fun SearchScreen(vm: AppViewModel) {
     val state by vm.search.collectAsState()
+    val sources = remember { vm.installedSources() }
     val browsing = state.query.isBlank()
 
     LaunchedEffect(Unit) {
@@ -43,6 +48,27 @@ fun SearchScreen(vm: AppViewModel) {
             onSubmit = { vm.runSearch(state.query) },
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
         )
+
+        LazyRow(
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(top = 4.dp, bottom = 4.dp),
+        ) {
+            item(key = ALL_SOURCES) {
+                Chip(
+                    text = "All sources",
+                    selected = state.sourceId == ALL_SOURCES,
+                    onClick = { vm.setSearchSource(ALL_SOURCES) },
+                )
+            }
+            items(sources, key = { it.id }) { source ->
+                Chip(
+                    text = source.name.removeSuffix(" Scans"),
+                    selected = state.sourceId == source.id,
+                    onClick = { vm.setSearchSource(source.id) },
+                )
+            }
+        }
 
         Spacer(Modifier.height(6.dp))
 
@@ -66,10 +92,19 @@ fun SearchScreen(vm: AppViewModel) {
             state.results.isEmpty() -> EmptyState(
                 glyph = Glyph.Search,
                 title = if (browsing) "Nothing to show" else "No manhwa found",
-                message = if (browsing) {
-                    "MangaDex returned nothing for this list."
+                message = if (state.sourceId == ALL_SOURCES) {
+                    if (browsing) {
+                        "None of the installed sources returned anything for this list."
+                    } else {
+                        "No English manhwa for \"${state.query}\" on any installed source."
+                    }
                 } else {
-                    "\"${state.query}\" has no English manhwa chapters on MangaDex."
+                    val name = vm.sourceName(state.sourceId)
+                    if (browsing) {
+                        "$name returned nothing for this list."
+                    } else {
+                        "No English manhwa for \"${state.query}\" on $name."
+                    }
                 },
                 modifier = Modifier.padding(top = 20.dp),
             )
@@ -83,7 +118,8 @@ fun SearchScreen(vm: AppViewModel) {
                     ListRow(
                         title = manhwa.title,
                         coverUrl = manhwa.coverUrl,
-                        subtitle = manhwa.meta(),
+                        subtitle = listOfNotNull(manhwa.meta(), vm.sourceName(manhwa.sourceId))
+                            .joinToString(" · "),
                         onClick = { vm.openProfile(manhwa.id) },
                     )
                 }

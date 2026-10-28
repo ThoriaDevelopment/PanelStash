@@ -59,11 +59,29 @@ class MangaDexMappingTest {
     }
 
     @Test
-    fun `external chapters are marked unreadable and dropped from the list`() {
+    fun `external chapters keep their link and are listed as bookmarks`() {
         val dto = json.decodeFromString<ChapterListResponse>(externalChapterPayload).data.single()
         val chapter = dto.toSourceChapter()!!
         assertTrue(chapter.externalOnly)
+        assertEquals(
+            "https://www.webnovel.com/comic/15227640605485101",
+            chapter.externalUrl,
+        )
+        // Other sources still hide their locked chapters; MangaDex asks for these on purpose.
         assertTrue(dedupeChapters(listOf(chapter)).isEmpty())
+        assertEquals(1, dedupeChapters(listOf(chapter), includeExternal = true).size)
+    }
+
+    @Test
+    fun `a zero-page chapter with nowhere to go is still dropped`() {
+        val payload = """
+            {"result":"ok","data":[{
+              "id":"empty-1","type":"chapter",
+              "attributes":{"chapter":"9","translatedLanguage":"en","pages":0}
+            }]}
+        """.trimIndent()
+        val dto = json.decodeFromString<ChapterListResponse>(payload).data.single()
+        assertNull(dto.toSourceChapter())
     }
 
     @Test

@@ -23,12 +23,16 @@ internal fun MangaDto.toSourceManhwa(): SourceManhwa {
 }
 
 /**
- * Returns null for chapters that cannot be read here: no number, unavailable, external-only
- * (hosted on another site), or reporting zero pages.
+ * Returns null only for chapters that cannot be represented at all: no number, unavailable, or
+ * zero pages with nowhere to send the reader. A chapter hosted on another site keeps its
+ * [SourceChapter.externalUrl], so licensed English chapters can be listed as bookmarks instead
+ * of disappearing from the profile.
  */
 internal fun ChapterDto.toSourceChapter(): SourceChapter? {
     val number = attributes.chapter?.trim() ?: return null
     if (attributes.isUnavailable) return null
+    val externalUrl = attributes.externalUrl
+    if (externalUrl == null && attributes.pages <= 0) return null
     return SourceChapter(
         remoteId = id,
         numberText = number,
@@ -36,6 +40,7 @@ internal fun ChapterDto.toSourceChapter(): SourceChapter? {
         title = attributes.title,
         language = attributes.translatedLanguage,
         pageCount = attributes.pages,
-        externalOnly = attributes.externalUrl != null || attributes.pages <= 0,
+        externalOnly = externalUrl != null || attributes.pages <= 0,
+        externalUrl = externalUrl,
     )
 }

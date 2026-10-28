@@ -108,8 +108,8 @@ fun Modifier.glass(
         elevation = elevation,
         shape = shape,
         clip = false,
-        ambientColor = Palette.Shadow.copy(alpha = 0.45f),
-        spotColor = Palette.Shadow.copy(alpha = 0.6f),
+        ambientColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.18f else 0.45f),
+        spotColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.24f else 0.6f),
     )
     .clip(shape)
     .background(
@@ -117,14 +117,14 @@ fun Modifier.glass(
             colors = if (strong) {
                 listOf(Palette.GlassStrong, Palette.Glass)
             } else {
-                listOf(Palette.Glass, Color(0x05FFFFFF))
+                listOf(Palette.Glass, Palette.GlassFilm)
             },
         ),
     )
     .border(
         width = 1.dp,
         brush = Brush.linearGradient(
-            listOf(Color(0x33FFFFFF), Color(0x0AFFFFFF)),
+            listOf(Palette.GlassEdgeStrong, Palette.GlassEdgeSoft),
         ),
         shape = shape,
     )
@@ -134,10 +134,10 @@ fun Modifier.well(shape: androidx.compose.ui.graphics.Shape): Modifier = this
     .clip(shape)
     .background(
         Brush.linearGradient(
-            listOf(Color(0x1A000000), Color(0x0AFFFFFF)),
+            listOf(Palette.WellTop, Palette.WellBottom),
         ),
     )
-    .border(1.dp, Color(0x0DFFFFFF), shape)
+    .border(1.dp, Palette.WellBorder, shape)
 
 @Composable
 fun GlassCard(
@@ -469,7 +469,7 @@ fun PillButton(
     val background: Modifier = when {
         !enabled -> Modifier
             .clip(shape)
-            .background(Color(0x0AFFFFFF))
+            .background(Palette.Control)
 
         selected -> Modifier
             .clip(shape)
@@ -493,14 +493,14 @@ fun PillButton(
 
         tone == PillTone.Quiet -> Modifier
             .clip(shape)
-            .background(Color(0x0FFFFFFF))
+            .background(Palette.Control)
 
         else -> Modifier.glass(shape, elevation = 8.dp)
     }
     val contentColor = when {
         !enabled -> Palette.InkTertiary
         selected -> Palette.Accent
-        tone == PillTone.Accent -> Color(0xFF0C0C16)
+        tone == PillTone.Accent -> Palette.OnAccent
         else -> Palette.Ink
     }
 
@@ -690,9 +690,7 @@ fun TopBar(
             .then(
                 if (scrim) {
                     Modifier.background(
-                        Brush.verticalGradient(
-                            listOf(Color(0xD907070A), Color(0x8007070A), Color.Transparent),
-                        ),
+                        Brush.verticalGradient(Palette.topBarScrim()),
                     )
                 } else {
                     Modifier
@@ -751,12 +749,12 @@ fun Shimmer(modifier: Modifier = Modifier, shape: androidx.compose.ui.graphics.S
     Box(
         modifier
             .clip(shape)
-            .background(Color(0x0AFFFFFF))
+            .background(Palette.ShimmerBase)
             .drawBehind {
                 val startX = -size.width + (size.width * 2.4f) * sweep
                 drawRect(
                     brush = Brush.linearGradient(
-                        colors = listOf(Color.Transparent, Color(0x1FFFFFFF), Color.Transparent),
+                        colors = listOf(Color.Transparent, Palette.ShimmerHighlight, Color.Transparent),
                         start = Offset(startX, 0f),
                         end = Offset(startX + size.width * 0.55f, size.height),
                     ),
@@ -785,10 +783,10 @@ fun Cover(
     Box(
         modifier
             .clip(shape)
-            .background(Color(0x0FFFFFFF))
+            .background(Palette.Glass)
             .then(
                 if (border) {
-                    Modifier.border(1.dp, Color(0x1AFFFFFF), shape)
+                    Modifier.border(1.dp, Palette.ControlBorder, shape)
                 } else {
                     Modifier
                 },
@@ -826,7 +824,7 @@ private fun InitialsPanel(text: String?) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Brush.linearGradient(listOf(Color(0x1AFFFFFF), Palette.accentFill(0.10f)))),
+            .background(Brush.linearGradient(listOf(Palette.Control, Palette.accentFill(0.10f)))),
         contentAlignment = Alignment.Center,
     ) {
         val initials = remember(text) {
@@ -864,8 +862,8 @@ fun PosterCard(
                 elevation = 18.dp,
                 shape = shape,
                 clip = false,
-                ambientColor = Palette.Shadow.copy(alpha = 0.5f),
-                spotColor = Palette.Shadow.copy(alpha = 0.7f),
+                ambientColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.2f else 0.5f),
+                spotColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.28f else 0.7f),
             )
             .clip(shape),
     ) {
@@ -893,14 +891,14 @@ fun PosterCard(
                 Text(
                     text = badge,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Palette.Ink,
+                    color = Palette.OnArtwork,
                 )
             }
         }
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall,
-            color = Palette.Ink,
+            color = Palette.OnArtwork,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier
@@ -941,8 +939,8 @@ fun ListRow(
                     Modifier
                         .size(46.dp)
                         .clip(CircleShape)
-                        .background(Color(0x14FFFFFF))
-                        .border(1.dp, Color(0x14FFFFFF), CircleShape),
+                        .background(Palette.Control)
+                        .border(1.dp, Palette.ControlBorder, CircleShape),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -1000,7 +998,7 @@ fun ProgressBar(
     fraction: Float,
     modifier: Modifier = Modifier,
     height: Dp = 5.dp,
-    track: Color = Color(0x1AFFFFFF),
+    track: Color = Palette.Track,
 ) {
     val animated by animateFloatAsState(
         targetValue = fraction.coerceIn(0f, 1f),
@@ -1170,8 +1168,8 @@ fun Toggle(
                         .border(1.dp, Palette.accentEdge(0.5f), shape)
                 } else {
                     Modifier
-                        .background(Color(0x14FFFFFF))
-                        .border(1.dp, Color(0x1AFFFFFF), shape)
+                        .background(Palette.Control)
+                        .border(1.dp, Palette.ControlBorder, shape)
                 },
             )
             .pressable({ onCheckedChange(!checked) }, scaleDown = 0.94f),
@@ -1181,7 +1179,7 @@ fun Toggle(
                 .offset { IntOffset(knob.roundToPx(), 3.dp.roundToPx()) }
                 .size(22.dp)
                 .clip(CircleShape)
-                .background(if (checked) Color(0xFF0C0C16) else Palette.InkSecondary),
+                .background(if (checked) Palette.OnAccent else Palette.InkSecondary),
         )
     }
 }
@@ -1262,7 +1260,7 @@ fun Sheet(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(Color(0xCC000000))
+                .background(Palette.Scrim)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,

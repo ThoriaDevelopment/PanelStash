@@ -26,15 +26,32 @@ enum class AccentTheme(val label: String) {
 }
 
 enum class CanvasStyle(val label: String) {
-    /** Near-black with two faint colour glows behind the translucent surfaces. */
+    /** Near-black (or warm off-white in light mode) with two faint colour glows. */
     GLASS("Glass"),
 
-    /** True black, for OLED panels and for people who want the glows gone. */
+    /** True black, or pure white in light mode, for people who want the glows gone. */
     OLED("Pure black"),
     ;
 
+    /** The label follows the mode: "pure black" is not a thing in a light theme. */
+    fun labelFor(mode: ThemeMode): String = when (this) {
+        GLASS -> label
+        OLED -> if (mode == ThemeMode.LIGHT) "Pure white" else label
+    }
+
     companion object {
         fun fromName(value: String?): CanvasStyle = entries.firstOrNull { it.name == value } ?: GLASS
+    }
+}
+
+/** Which side of the canvas the app draws on. Light still offers both glass and pure. */
+enum class ThemeMode(val label: String) {
+    DARK("Dark"),
+    LIGHT("Light"),
+    ;
+
+    companion object {
+        fun fromName(value: String?): ThemeMode = entries.firstOrNull { it.name == value } ?: DARK
     }
 }
 
@@ -43,10 +60,9 @@ enum class CanvasStyle(val label: String) {
  * flick rather than a transition, slow enough to read as movement instead of a cut.
  */
 enum class TapScroll(val label: String, val durationMs: Int) {
-    OFF("Off", 0),
-    QUICK("Quick", 150),
-    NORMAL("Normal", 300),
-    RELAXED("Relaxed", 500),
+    NORMAL("300 ms", 300),
+    SLOW("500 ms", 500),
+    RELAXED("700 ms", 700),
     ;
 
     companion object {
@@ -73,6 +89,7 @@ enum class PageFit(val label: String) {
  */
 data class Preferences(
     val accent: AccentTheme = AccentTheme.BRAND,
+    val themeMode: ThemeMode = ThemeMode.DARK,
     val canvas: CanvasStyle = CanvasStyle.GLASS,
     /** Browse grid density. */
     val gridColumns: Int = 2,
@@ -121,6 +138,7 @@ class Settings(context: Context) {
 
     private fun read(): Preferences = Preferences(
         accent = AccentTheme.fromName(prefs.getString(KEY_ACCENT, null)),
+        themeMode = ThemeMode.fromName(prefs.getString(KEY_THEME_MODE, null)),
         canvas = CanvasStyle.fromName(prefs.getString(KEY_CANVAS, null)),
         gridColumns = prefs.getInt(KEY_GRID_COLUMNS, 2).coerceIn(2, 4),
         pageFit = PageFit.fromName(prefs.getString(KEY_PAGE_FIT, null)),
@@ -151,6 +169,7 @@ class Settings(context: Context) {
     private fun persist(value: Preferences) {
         prefs.edit {
             putString(KEY_ACCENT, value.accent.name)
+            putString(KEY_THEME_MODE, value.themeMode.name)
             putString(KEY_CANVAS, value.canvas.name)
             putInt(KEY_GRID_COLUMNS, value.gridColumns)
             putString(KEY_PAGE_FIT, value.pageFit.name)
@@ -172,6 +191,7 @@ class Settings(context: Context) {
         const val KEY_DOWNLOAD_QUALITY = "download_quality"
         const val KEY_STREAMING_QUALITY = "streaming_quality"
         const val KEY_ACCENT = "accent"
+        const val KEY_THEME_MODE = "theme_mode"
         const val KEY_CANVAS = "canvas"
         const val KEY_GRID_COLUMNS = "grid_columns"
         const val KEY_PAGE_FIT = "page_fit"

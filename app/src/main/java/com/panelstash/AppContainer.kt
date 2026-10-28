@@ -13,6 +13,7 @@ import com.panelstash.data.Settings
 import com.panelstash.data.db.PanelStashDatabase
 import com.panelstash.download.DownloadScheduler
 import com.panelstash.download.DownloadStore
+import com.panelstash.source.AsuraScansSource
 import com.panelstash.source.AtHomeReporter
 import com.panelstash.source.KaynScansSource
 import com.panelstash.source.MangaDexSource
@@ -54,6 +55,7 @@ class AppContainer(context: Context) {
     val sources = SourceRegistry(
         listOf(
             MangaDexSource(apiClient, SourceGate()),
+            AsuraScansSource(apiClient, SourceGate()),
             VortexScansSource(apiClient, SourceGate()),
             NyxScansSource(apiClient, SourceGate()),
             OrionScansSource(apiClient, SourceGate()),

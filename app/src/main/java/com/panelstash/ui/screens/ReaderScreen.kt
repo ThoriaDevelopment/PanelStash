@@ -64,6 +64,7 @@ import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
+import coil3.size.Precision
 import com.panelstash.data.PageFit
 import com.panelstash.data.ReaderPage
 import com.panelstash.ui.AppViewModel
@@ -224,15 +225,19 @@ fun ReaderScreen(vm: AppViewModel) {
                                 when {
                                     preferences.pageFit == PageFit.HEIGHT -> {
                                         // Fit page shows one page at a time, so a 70% nudge would
-                                        // leave the reader looking at two halves of one.
+                                        // leave the reader looking at two halves of one. Every page
+                                        // is exactly one viewport tall, so a full viewport of
+                                        // travel lands on the next one and honours the chosen
+                                        // duration, which animateScrollToItem cannot.
                                         val index = listState.firstVisibleItemIndex
                                         if (index >= current.pages.size) return@launch
-                                        val next = (index + 1).coerceAtMost(current.pages.size)
-                                        if (tapScroll.durationMs <= 0) {
-                                            listState.scrollToItem(next)
-                                        } else {
-                                            listState.animateScrollToItem(next)
-                                        }
+                                        listState.animateScrollBy(
+                                            value = viewport,
+                                            animationSpec = tween(
+                                                durationMillis = tapScroll.durationMs,
+                                                easing = FastOutSlowInEasing,
+                                            ),
+                                        )
                                     }
 
                                     tapScroll.durationMs <= 0 ->
@@ -259,6 +264,8 @@ fun ReaderScreen(vm: AppViewModel) {
                         is ReaderPage.Remote -> page.url
                     },
                     aspectHint = page.aspectOrNull(),
+                    sourceWidth = page.width,
+                    sourceHeight = page.height,
                     fitHeight = preferences.pageFit == PageFit.HEIGHT,
                     widthPx = widthPx,
                 )
@@ -327,6 +334,8 @@ fun ReaderScreen(vm: AppViewModel) {
 private fun LazyItemScope.ReaderPageImage(
     model: Any,
     aspectHint: Float?,
+    sourceWidth: Int,
+    sourceHeight: Int,
     fitHeight: Boolean,
     widthPx: Int,
 ) {
@@ -339,15 +348,28 @@ private fun LazyItemScope.ReaderPageImage(
         Modifier.fillMaxWidth().aspectRatio(aspect)
     }
 
-    val request = remember(model, widthPx, aspectHint) {
-        if (widthPx <= 0 || model !is String) {
+    val request = remember(model, widthPx, aspectHint, sourceWidth, sourceHeight) {
+        if (widthPx <= 0) {
             model
         } else {
-            val height = (widthPx / (aspectHint ?: FALLBACK_PAGE_ASPECT)).toInt().coerceAtLeast(1)
+            // Never ask for more pixels than the source has: an 800 px webtoon strip scaled to
+            // a 1080 px viewport is a 20,000 px-tall bitmap, past the texture limit on many
+            // phones, and the page renders as a black rectangle.
+            val requestWidth = if (sourceWidth > 0) minOf(widthPx, sourceWidth) else widthPx
+            val estimatedHeight = when {
+                sourceWidth > 0 && sourceHeight > 0 ->
+                    (requestWidth.toLong() * sourceHeight / sourceWidth).toInt()
+
+                else -> (requestWidth / (aspectHint ?: FALLBACK_PAGE_ASPECT)).toInt()
+            }.coerceAtLeast(1)
+            val requestHeight = estimatedHeight.coerceAtMost(MAX_BITMAP_DIMENSION)
             ImageRequest.Builder(context)
                 .data(model)
-                .size(widthPx, height)
-                .allowHardware(true)
+                .size(requestWidth, requestHeight)
+                .precision(Precision.INEXACT)
+                // A hardware bitmap is uploaded as one texture. Very tall strips exceed the
+                // limit and fail to draw, so those decode in software instead.
+                .allowHardware(requestHeight <= MAX_HARDWARE_DIMENSION)
                 .build()
         }
     }
@@ -368,6 +390,12 @@ private fun LazyItemScope.ReaderPageImage(
 
 /** Roughly the shape of one slice of a webtoon page, used until the real size is known. */
 private const val FALLBACK_PAGE_ASPECT = 0.64f
+
+/** Conservative ceiling for a decoded page on GPUs whose texture limit is 8192 px. */
+private const val MAX_HARDWARE_DIMENSION = 8_192
+
+/** Even a software bitmap has to fit in memory; taller strips are downscaled to this. */
+private const val MAX_BITMAP_DIMENSION = 16_384
 
 /** How much of the readable screen a tap carries the reader forward. */
 private const val TAP_FRACTION = 0.7f
@@ -394,11 +422,11 @@ private fun ReaderTopBar(title: String, chapter: String, onBack: () -> Unit) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
-                color = Palette.Ink,
+                color = Palette.ReaderInk,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Eyebrow("CHAPTER $chapter", color = Palette.InkSecondary)
+            Eyebrow("CHAPTER $chapter", color = Palette.ReaderInkSecondary)
         }
     }
 }
@@ -417,9 +445,9 @@ private fun ReaderBottomBar(total: Int, pageOf: () -> Int, onExit: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        ProgressBar(progress, height = 3.dp)
+        ProgressBar(progress, height = 3.dp, track = Color(0x33FFFFFF))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Eyebrow("PAGE $page / $total", color = Palette.InkSecondary)
+            Eyebrow("PAGE $page / $total", color = Palette.ReaderInkSecondary)
             Spacer(Modifier.weight(1f))
             PillButton("Chapter list", onExit, tone = PillTone.Glass)
         }
@@ -458,7 +486,7 @@ private fun EndCard(
                         val inset = stroke / 2
                         val arc = Size(size.width - stroke, size.height - stroke)
                         drawArc(
-                            color = Color(0x26FFFFFF),
+                            color = Palette.Track,
                             startAngle = -90f,
                             sweepAngle = 360f,
                             useCenter = false,

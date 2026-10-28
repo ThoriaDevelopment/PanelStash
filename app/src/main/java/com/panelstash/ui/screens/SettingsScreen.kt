@@ -30,6 +30,7 @@ import com.panelstash.data.AccentTheme
 import com.panelstash.data.CanvasStyle
 import com.panelstash.data.PageFit
 import com.panelstash.data.TapScroll
+import com.panelstash.data.ThemeMode
 import com.panelstash.source.BrowseSort
 import com.panelstash.source.PageQuality
 import com.panelstash.ui.AppViewModel
@@ -101,11 +102,24 @@ fun SettingsScreen(vm: AppViewModel) {
                 }
             }
 
+            item(key = "theme") {
+                ChoiceRow(
+                    title = "Theme",
+                    subtitle = "Light keeps the same glass and pure surfaces, on a light canvas.",
+                    options = ThemeMode.entries.map { it.label },
+                    selectedIndex = ThemeMode.entries.indexOf(preferences.themeMode).coerceAtLeast(0),
+                    onSelect = { index ->
+                        vm.updatePreferences { it.copy(themeMode = ThemeMode.entries[index]) }
+                    },
+                )
+            }
+
             item(key = "canvas") {
+                val pureLabel = if (preferences.themeMode == ThemeMode.LIGHT) "Pure white" else "Pure black"
                 ChoiceRow(
                     title = "Canvas",
-                    subtitle = "Pure black switches off the colour glows behind the glass.",
-                    options = CanvasStyle.entries.map { it.label },
+                    subtitle = "$pureLabel switches off the colour glows behind the glass.",
+                    options = CanvasStyle.entries.map { it.labelFor(preferences.themeMode) },
                     selectedIndex = CanvasStyle.entries.indexOf(preferences.canvas).coerceAtLeast(0),
                     onSelect = { index ->
                         vm.updatePreferences { it.copy(canvas = CanvasStyle.entries[index]) }
@@ -140,7 +154,7 @@ fun SettingsScreen(vm: AppViewModel) {
             item(key = "tap-scroll") {
                 ChoiceRow(
                     title = "Tap scroll speed",
-                    subtitle = "How long a tap takes to scroll forward 70% of the screen.",
+                    subtitle = "How long a tap takes to move forward a screenful.",
                     options = TapScroll.entries.map { it.label },
                     selectedIndex = TapScroll.entries.indexOf(preferences.tapScroll).coerceAtLeast(0),
                     onSelect = { index ->

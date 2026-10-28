@@ -84,12 +84,16 @@ internal object MangaDexApi {
             add("order[followedCount]" to "desc")
         }
 
+    /**
+     * External chapters are requested rather than filtered out. MangaDex keeps licensed English
+     * chapters as links to the official publisher, which is why a title can advertise English
+     * translations and still return nothing here with `includeExternalUrl=0`.
+     */
     fun chapterFeedParams(language: String, offset: Int): List<Pair<String, Any>> = listOf(
         "translatedLanguage[]" to language,
         "limit" to FEED_PAGE_SIZE,
         "offset" to offset,
         "order[chapter]" to "asc",
-        "includeExternalUrl" to 0,
     )
 }
 
@@ -181,7 +185,7 @@ class MangaDexSource(
             if (page.size < MangaDexApi.FEED_PAGE_SIZE) break
             offset += MangaDexApi.FEED_PAGE_SIZE
         }
-        return dedupeChapters(collected)
+        return dedupeChapters(collected, includeExternal = true)
     }
 
     /**

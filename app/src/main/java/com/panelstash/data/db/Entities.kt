@@ -48,6 +48,8 @@ data class ChapterEntity(
     val pageCount: Int = 0,
     /** Set only when the chapter is finished. Null means unread. */
     val readAt: Long? = null,
+    /** Where the chapter lives when it is hosted elsewhere, e.g. a MangaDex official release. */
+    val externalUrl: String? = null,
 )
 
 @Entity(

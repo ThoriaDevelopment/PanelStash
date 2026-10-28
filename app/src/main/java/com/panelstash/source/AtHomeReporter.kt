@@ -56,14 +56,15 @@ class AtHomeReporter(private val scope: CoroutineScope) {
 }
 
 /**
- * Times and reports image traffic. Only at-home nodes are reported; MangaDex's own
- * hosts are not part of the network accounting.
+ * Times and reports image traffic. Only at-home nodes are reported: they live under
+ * `mangadex.network`, while MangaDex's own upload host and every scan-site image host are not
+ * part of the network accounting.
  */
 class AtHomeReportingInterceptor(private val reporter: AtHomeReporter) : Interceptor {
 
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        if (request.url.host.endsWith("mangadex.org")) return chain.proceed(request)
+        if (!request.url.host.endsWith("mangadex.network")) return chain.proceed(request)
 
         val startedAt = System.nanoTime()
         return try {

@@ -18,8 +18,13 @@ data class SourceChapter(
     val title: String?,
     val language: String,
     val pageCount: Int,
-    /** Chapters hosted elsewhere have no readable pages and are skipped. */
+    /** True when the chapter has no readable pages here (external, paid, coin-locked). */
     val externalOnly: Boolean,
+    /**
+     * Where an external chapter actually lives, when the source says so. MangaDex publishes
+     * licensed English chapters this way; they are listed but cannot be read in the app.
+     */
+    val externalUrl: String? = null,
 )
 
 data class PageImage(
@@ -136,11 +141,15 @@ fun chapterSortKey(numberText: String): Double? = numberText.trim().toDoubleOrNu
 /**
  * Collapses duplicate chapter numbers (same number uploaded by several groups) into one.
  * Keeps the entry with the most pages, then the most recently uploaded.
+ *
+ * External-only chapters are dropped by default. A source that lists them deliberately (MangaDex
+ * does for licensed titles) passes [includeExternal] so they remain visible as bookmarks, while a
+ * readable upload of the same number still wins.
  */
-fun dedupeChapters(chapters: List<SourceChapter>): List<SourceChapter> {
+fun dedupeChapters(chapters: List<SourceChapter>, includeExternal: Boolean = false): List<SourceChapter> {
     val best = LinkedHashMap<String, SourceChapter>()
     for (chapter in chapters) {
-        if (chapter.externalOnly) continue
+        if (chapter.externalOnly && !includeExternal) continue
         val key = chapter.numberText.trim()
         val current = best[key]
         if (current == null || chapter.pageCount > current.pageCount) {

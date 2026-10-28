@@ -1,5 +1,7 @@
 package com.panelstash.ui.screens
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -80,6 +82,17 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     var showJump by remember { mutableStateOf(false) }
     var jumpQuery by remember { mutableStateOf("") }
 
+    /** External chapters are bookmarks to the publisher; everything else opens in the reader. */
+    fun openChapter(chapter: ChapterEntity, page: Int = 0) {
+        val url = chapter.externalUrl
+        if (url != null) {
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                .onFailure { vm.showMessage("No browser to open this chapter") }
+        } else {
+            vm.openChapter(chapter.id, page)
+        }
+    }
+
     LaunchedEffect(manhwaId) { vm.ensureChapters(manhwaId) }
 
     val current = state
@@ -130,9 +143,13 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         }
 
         val manhwa = current.manhwa
-        val readCount = current.chapters.count { it.readAt != null }
-        val continueChapter = current.chapters.firstOrNull { it.id == current.resumeChapterId }
-            ?: current.chapters.firstOrNull()
+        // External chapters are bookmarks to a publisher, so they must not make 100% progress
+        // unreachable for a title that also has readable chapters here.
+        val readable = current.chapters.filter { it.externalUrl == null }
+        val readCount = readable.count { it.readAt != null }
+        val continueChapter = current.chapters.firstOrNull {
+            it.id == current.resumeChapterId && it.externalUrl == null
+        } ?: current.chapters.firstOrNull { it.externalUrl == null }
         val ordered = if (preferences.reverseChapters) {
             current.chapters.asReversed()
         } else {
@@ -154,9 +171,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             .fillMaxWidth()
                             .height(230.dp)
                             .background(
-                                Brush.verticalGradient(
-                                    listOf(Color(0x9907070A), Color(0xCC07070A), Palette.Canvas),
-                                ),
+                                Brush.verticalGradient(Palette.heroScrim()),
                             ),
                     )
                     Row(
@@ -189,15 +204,15 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             if (meta.isNotEmpty()) {
                                 Eyebrow(meta, Modifier.padding(top = 6.dp), color = Palette.InkSecondary)
                             }
-                            if (current.chapters.isNotEmpty()) {
+                            if (readable.isNotEmpty()) {
                                 Text(
-                                    text = "$readCount of ${current.chapters.size} chapters read",
+                                    text = "$readCount of ${readable.size} chapters read",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = Palette.InkSecondary,
                                     modifier = Modifier.padding(top = 8.dp),
                                 )
                                 ProgressBar(
-                                    fraction = readCount.toFloat() / current.chapters.size,
+                                    fraction = readCount.toFloat() / readable.size,
                                     modifier = Modifier.padding(top = 8.dp),
                                 )
                             }
@@ -221,7 +236,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         onClick = {
                             continueChapter?.let {
                                 val page = if (it.id == current.resumeChapterId) current.resumePage else 0
-                                vm.openChapter(it.id, page)
+                                openChapter(it, page)
                             }
                         },
                     )
@@ -254,11 +269,12 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         selected = later,
                         onClick = { vm.toggleReadLater(manhwaId, !later) },
                     )
+                    val downloadable = current.chapters.filter { it.externalUrl == null }
                     PillButton(
                         text = "Download all",
                         glyph = Glyph.Download,
-                        enabled = current.chapters.isNotEmpty(),
-                        onClick = { startDownload(current.chapters) },
+                        enabled = downloadable.isNotEmpty(),
+                        onClick = { startDownload(downloadable) },
                     )
                 }
             }
@@ -338,7 +354,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         download = current.downloads[chapter.id],
                         onOpen = {
                             val page = if (chapter.id == current.resumeChapterId) current.resumePage else 0
-                            vm.openChapter(chapter.id, page)
+                            openChapter(chapter, page)
                         },
                         onToggleRead = { vm.setChapterRead(chapter.id, chapter.readAt == null) },
                         onDownload = { startDownload(listOf(chapter)) },
@@ -355,14 +371,15 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         title = "Jump to chapter",
     ) {
         val chapterList = current?.chapters.orEmpty()
-        val firstUnread = chapterList.firstOrNull { it.readAt == null }
+        val firstUnread = chapterList.firstOrNull { it.readAt == null && it.externalUrl == null }
+        val readableChapters = chapterList.filter { it.externalUrl == null }
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 PillButton(
                     text = "First",
                     tone = PillTone.Quiet,
                     onClick = {
-                        chapterList.firstOrNull()?.let { vm.openChapter(it.id, 0) }
+                        readableChapters.firstOrNull()?.let { openChapter(it) }
                         showJump = false
                     },
                 )
@@ -370,7 +387,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                     text = "Latest",
                     tone = PillTone.Quiet,
                     onClick = {
-                        chapterList.lastOrNull()?.let { vm.openChapter(it.id, 0) }
+                        readableChapters.lastOrNull()?.let { openChapter(it) }
                         showJump = false
                     },
                 )
@@ -379,7 +396,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                     tone = PillTone.Quiet,
                     enabled = firstUnread != null,
                     onClick = {
-                        firstUnread?.let { vm.openChapter(it.id, 0) }
+                        firstUnread?.let { openChapter(it) }
                         showJump = false
                     },
                 )
@@ -397,7 +414,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         val target = chapterList.firstOrNull { it.numberText == wanted }
                             ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
                         if (target != null) {
-                            vm.openChapter(target.id, 0)
+                            openChapter(target)
                             showJump = false
                         } else {
                             vm.showMessage("No chapter $jumpQuery")
@@ -412,7 +429,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         val target = chapterList.firstOrNull { it.numberText == wanted }
                             ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
                         if (target != null) {
-                            vm.openChapter(target.id, 0)
+                            openChapter(target)
                             showJump = false
                         } else {
                             vm.showMessage("No chapter $jumpQuery")
@@ -435,7 +452,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(14.dp))
                             .pressable({
-                                vm.openChapter(chapter.id, 0)
+                                openChapter(chapter)
                                 showJump = false
                             })
                             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -497,6 +514,7 @@ private fun ChapterCard(
     onDelete: () -> Unit,
 ) {
     val read = chapter.readAt != null
+    val external = chapter.externalUrl != null
 
     GlassCard(
         modifier = Modifier
@@ -518,8 +536,8 @@ private fun ChapterCard(
                             Modifier.background(Brush.linearGradient(Palette.AccentGradient))
                         } else {
                             Modifier
-                                .background(Color(0x14FFFFFF))
-                                .border(1.dp, Color(0x14FFFFFF), CircleShape)
+                                .background(Palette.Control)
+                                .border(1.dp, Palette.ControlBorder, CircleShape)
                         },
                     )
                     .graphicsLayer { alpha = if (read) 0.6f else 1f },
@@ -529,14 +547,14 @@ private fun ChapterCard(
                     GlyphIcon(
                         Glyph.Check,
                         size = 18.dp,
-                        tint = if (isResumePoint) Color(0xFF0C0C16) else Palette.Success,
+                        tint = if (isResumePoint) Palette.OnAccent else Palette.Success,
                         stroke = 2.2.dp,
                     )
                 } else {
                     Text(
                         text = chapter.numberText.take(4),
                         style = MaterialTheme.typography.labelMedium,
-                        color = if (isResumePoint) Color(0xFF0C0C16) else Palette.Ink,
+                        color = if (isResumePoint) Palette.OnAccent else Palette.Ink,
                     )
                 }
             }
@@ -554,6 +572,7 @@ private fun ChapterCard(
                 val subtitle = buildList {
                     if (!chapter.title.isNullOrBlank()) add(chapter.title)
                     if (chapter.pageCount > 0) add("${chapter.pageCount} pages")
+                    if (external) add("External · opens in browser")
                     if (isResumePoint) add("reading now")
                 }.joinToString(" · ")
                 if (subtitle.isNotEmpty()) {
@@ -570,6 +589,8 @@ private fun ChapterCard(
             Spacer(Modifier.width(8.dp))
 
             when {
+                external -> Eyebrow("EXTERNAL", color = Palette.Accent)
+
                 download == null -> IconButton(
                     glyph = Glyph.Download,
                     onClick = onDownload,

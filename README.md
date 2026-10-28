@@ -7,12 +7,12 @@
 ![Licence](https://img.shields.io/badge/licence-Apache_2.0-FB4B87?style=flat-square&labelColor=1B1D24)
 ![Platform](https://img.shields.io/badge/Android-8.0%2B%20%28API%2026%29-A97BFF?style=flat-square&labelColor=1B1D24)
 ![Stack](https://img.shields.io/badge/Kotlin_2.4-Compose-D45EC4?style=flat-square&labelColor=1B1D24)
-![Sources](https://img.shields.io/badge/sources-5-FB4B87?style=flat-square&labelColor=1B1D24)
+![Sources](https://img.shields.io/badge/sources-6-FB4B87?style=flat-square&labelColor=1B1D24)
 ![Version](https://img.shields.io/badge/version-0.1-A97BFF?style=flat-square&labelColor=1B1D24)
 
 </div>
 
-PanelStash is an Android app for reading manhwa. It renders chapters from five catalogue sources, keeps your place across them, and saves chapters to the device so you can read with no connection at all. There is no account and no server: everything it knows lives on the phone.
+PanelStash is an Android app for reading manhwa. It renders chapters from six catalogue sources, keeps your place across them, and saves chapters to the device so you can read with no connection at all. There is no account and no server: everything it knows lives on the phone.
 
 It is built for one hand and a slow connection. Pages arrive sized to the screen, a chapter reopens on the page you left, and a tap moves you forward a screenful.
 
@@ -20,13 +20,13 @@ It is built for one hand and a slow connection. Pages arrive sized to the screen
 
 | <img src="assets/screenshots/browse.jpg" width="300"> | <img src="assets/screenshots/search.jpg" width="300"> |
 |:--:|:--:|
-| <sub>Browse any source, with the sorts and filters that source can apply.</sub> | <sub>Search a source, or leave the field empty for its popular list.</sub> |
+| <sub>Browse one source or all of them, with the sorts and filters each can apply.</sub> | <sub>Search one source or all of them; an empty field shows the popular list.</sub> |
 | <img src="assets/screenshots/profile.jpg" width="300"> | <img src="assets/screenshots/reader.jpg" width="300"> |
-| <sub>Progress, follow, read later, download all, and a chapter list that marks what you finished.</sub> | <sub>A tap scrolls 70% of the screen. The bars follow the scroll direction.</sub> |
+| <sub>Progress, follow, read later, download all, and a chapter list that marks what you finished.</sub> | <sub>A tap scrolls 70% of the screen in 300, 500 or 700 ms. The bars follow the scroll direction.</sub> |
 | <img src="assets/screenshots/library.jpg" width="300"> | <img src="assets/screenshots/downloads.jpg" width="300"> |
 | <sub>Continue reading at the exact page, plus following, later and downloads.</sub> | <sub>Downloaded chapters live as files and open without a network.</sub> |
 | <img src="assets/screenshots/settings.jpg" width="300"> | <img src="assets/screenshots/sources.jpg" width="300"> |
-| <sub>Accent, canvas, grid density, page fit and tap scroll speed.</sub> | <sub>Every source lists what it can filter before you pick it.</sub> |
+| <sub>Theme, accent, canvas, grid density, page fit and tap scroll speed.</sub> | <sub>Every source lists what it can filter before you pick it.</sub> |
 
 ## What it does
 
@@ -53,17 +53,26 @@ Downloads:
 
 Look:
 
-- Five accent colours and two canvases: glass, with soft colour behind the panels, or pure black.
+- Dark or light, with two canvases in either: glass, with soft colour behind the panels, or pure (black in dark mode, white in light).
+- Six accent colours.
 - Poster grid at two, three or four columns.
+- A tap scrolls forward in 300, 500 or 700 ms.
 - Keep the screen awake while reading, and chapter lists either newest or oldest first.
 
 ## Sources
 
 <div align="center">
-  <img src="assets/readme/sources.png" alt="The five sources in 0.1" width="740">
+  <img src="assets/readme/sources.png" alt="The source picker in 0.1" width="740">
 </div>
 
-MangaDex is the widest catalogue and the only one with a documented API. The other four are scanlation sites read through the JSON their own front ends request, which means they can change without notice. All five sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter.
+- MangaDex — the widest catalogue and the only one with a documented API.
+- Asura Scans — large catalogue, with premium and early-access chapters marked unreadable.
+- Vortex Scans — smaller catalogue, fresh chapters.
+- Nyx Scans — small and curated, a mix of free and paid chapters.
+- Orion Scans — small catalogue, newest chapters free.
+- Kayn Scans — wide catalogue, newest chapters often coin-locked.
+
+MangaDex is the only source with a documented API. The other five are scanlation sites read through the endpoints and rendered pages their own front ends use, which means they can change without notice. All six sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter. Browse and search can also run across every source at once.
 
 A source declares what it can do, and the filter sheet only offers those controls:
 
@@ -117,7 +126,7 @@ Without that file the release build still runs and produces an unsigned APK, so 
 
 ## About the content
 
-PanelStash ships no catalogue of its own. It reads what the five sites publish and keeps downloaded chapters on your device. The work itself belongs to the people who made it, and each site's terms still apply, so install and use it for what you are entitled to read.
+PanelStash ships no catalogue of its own. It reads what the six sites publish and keeps downloaded chapters on your device. The work itself belongs to the people who made it, and each site's terms still apply, so install and use it for what you are entitled to read.
 
 ## Licence
 

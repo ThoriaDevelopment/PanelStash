@@ -2,9 +2,12 @@ package com.panelstash.data
 
 import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.ManhwaEntity
+import android.graphics.BitmapFactory
 import com.panelstash.download.DownloadStore
 import com.panelstash.source.SourceRegistry
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 sealed interface ReaderPage {
     /** Pixels, when the source reports them. Zero means "unknown", not "empty". */
@@ -49,7 +52,16 @@ class ReaderRepository(
         // A downloaded copy is checked before the cache, so finishing a download takes effect on
         // the very next open rather than after the cached page list expires.
         val local = downloads.localPages(chapter.id)
-        if (local != null) return local.map { ReaderPage.Local(it) }
+        if (local != null) return withContext(Dispatchers.IO) {
+            // Read the bounds so a downloaded webtoon keeps its exact shape before the bytes
+            // load. Without them a tall strip was requested at its full height, decoded as a
+            // hardware bitmap, and drawn as a black rectangle on phones with an 8k texture limit.
+            local.map { file ->
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.path, bounds)
+                ReaderPage.Local(file, bounds.outWidth, bounds.outHeight)
+            }
+        }
 
         cache[chapter.id]?.let { entry ->
             if (clock() - entry.at < CACHE_TTL_MS) return entry.pages

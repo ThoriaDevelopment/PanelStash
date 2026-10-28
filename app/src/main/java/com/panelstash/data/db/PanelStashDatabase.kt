@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [
@@ -14,7 +16,7 @@ import androidx.room.RoomDatabase
         ReadLaterEntity::class,
         DownloadEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = true,
 )
 abstract class PanelStashDatabase : RoomDatabase() {
@@ -26,6 +28,13 @@ abstract class PanelStashDatabase : RoomDatabase() {
     abstract fun downloadDao(): DownloadDao
 
     companion object {
+        /** Adds the external-chapter link without throwing away an existing library. */
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE chapter ADD COLUMN externalUrl TEXT")
+            }
+        }
+
         @Volatile
         private var instance: PanelStashDatabase? = null
 
@@ -36,6 +45,7 @@ abstract class PanelStashDatabase : RoomDatabase() {
                     PanelStashDatabase::class.java,
                     "panelstash.db",
                 )
+                    .addMigrations(MIGRATION_1_2)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { instance = it }

@@ -39,11 +39,24 @@ object Network {
         OkHttpClient.Builder()
             .addInterceptor(AtHomeReportingInterceptor(reporter))
             .addInterceptor { chain ->
-                chain.proceed(
-                    chain.request().newBuilder()
-                        .header("User-Agent", USER_AGENT)
-                        .build(),
-                )
+                val request = chain.request()
+                val builder = request.newBuilder()
+                    .header("User-Agent", USER_AGENT)
+                // Scanlation image CDNs sit behind the same edge as the site and some reject a
+                // request that arrives with no Referer. MangaDex uploads do not need one, and
+                // sending a foreign Referer there would be wrong.
+                refererFor(request.url.host)?.let { builder.header("Referer", it) }
+                chain.proceed(builder.build())
             }
             .build()
+
+    /** The site whose reader embeds this image host, or null when it is not a scan source. */
+    private fun refererFor(host: String): String? = when {
+        host.endsWith("asurascans.com") -> "https://asurascans.com/"
+        host.endsWith("vortexscans.org") -> "https://vortexscans.org/"
+        host.endsWith("nyxscans.com") -> "https://nyxscans.com/"
+        host.endsWith("orion-scans.com") -> "https://orion-scans.com/"
+        host.endsWith("kaynscans.com") -> "https://kaynscans.com/"
+        else -> null
+    }
 }

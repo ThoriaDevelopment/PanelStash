@@ -43,6 +43,7 @@ import com.panelstash.data.Preferences
 import com.panelstash.source.BrowseFilter
 import com.panelstash.source.SourceGenre
 import com.panelstash.source.StatusFilter
+import com.panelstash.ui.ALL_SOURCES
 import com.panelstash.ui.AppViewModel
 import com.panelstash.ui.Chip
 import com.panelstash.ui.ChoiceRow
@@ -230,7 +231,11 @@ fun BrowseScreen(vm: AppViewModel) {
                     PosterCard(
                         title = manhwa.title,
                         coverUrl = manhwa.coverUrl,
-                        badge = manhwa.year?.toString(),
+                        badge = if (state.sourceId == ALL_SOURCES) {
+                            vm.sourceName(manhwa.sourceId).removeSuffix(" Scans")
+                        } else {
+                            manhwa.year?.toString()
+                        },
                         onClick = { vm.openProfile(manhwa.id) },
                     )
                 }
@@ -263,6 +268,31 @@ fun BrowseScreen(vm: AppViewModel) {
         title = "Source",
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            val allSelected = state.sourceId == ALL_SOURCES
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pressable({
+                        vm.setBrowseSource(ALL_SOURCES)
+                        showSources = false
+                    }),
+                shape = RoundedCornerShape(18.dp),
+                strong = allSelected,
+                elevation = if (allSelected) 12.dp else 4.dp,
+                contentPadding = PaddingValues(14.dp),
+            ) {
+                Text(
+                    text = "All sources",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Palette.Ink,
+                )
+                Text(
+                    text = "Browse everything installed, one page at a time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Palette.InkSecondary,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
             vm.installedSources().forEach { source ->
                 val selected = source.id == state.sourceId
                 GlassCard(

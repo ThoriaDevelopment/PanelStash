@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
+import coil3.size.Precision
 import com.panelstash.PanelStashApp
 import com.panelstash.data.Preferences
 import com.panelstash.data.ReaderPage
@@ -16,6 +17,7 @@ import com.panelstash.source.BrowseFilter
 import com.panelstash.source.BrowseSort
 import com.panelstash.source.PageQuality
 import com.panelstash.source.Source
+import com.panelstash.source.SourceCapabilities
 import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
 import kotlinx.coroutines.Dispatchers
@@ -31,6 +33,9 @@ import kotlinx.coroutines.launch
 
 private const val BROWSE_PAGE = 30
 private const val PREFETCH_AHEAD = 3
+
+/** Taller pages skip prefetching; they decode slowly and would crowd the memory cache. */
+private const val MAX_PREFETCH_HEIGHT = 8_192
 
 /** Roughly the shape of one slice of a webtoon page, used when the source does not say. */
 const val FALLBACK_PAGE_ASPECT = 0.64f
@@ -118,6 +123,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var matchJob: Job? = null
     private var genresRequestedFor: String? = null
     private var prefetchedUpTo = -1
+    /** Per-source offsets while Browse is showing every installed source. */
+    private var allBrowseOffsets: Map<String, Int> = emptyMap()
     private val chaptersInFlight = mutableSetOf<Long>()
 
     /**
@@ -156,7 +163,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** The display name of a source id, for headers and metadata lines. */
     fun sourceName(sourceId: String): String =
-        library.source(sourceId)?.name ?: sourceId
+        if (sourceId == ALL_SOURCES) "All sources" else library.source(sourceId)?.name ?: sourceId
 
     // --- navigation -------------------------------------------------------
 
@@ -236,16 +243,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setBrowseSource(sourceId: String) {
         if (_browse.value.sourceId == sourceId) return
-        val source = library.source(sourceId) ?: return
+        val source = library.source(sourceId)
+        if (sourceId != ALL_SOURCES && source == null) return
         genresRequestedFor = null
+        allBrowseOffsets = emptyMap()
         _browse.value = _browse.value.copy(
-            sourceId = source.id,
-            sourceName = source.name,
-            capabilities = source.capabilities,
+            sourceId = sourceId,
+            sourceName = source?.name ?: "All sources",
+            capabilities = source?.capabilities ?: SourceCapabilities(
+                sorts = setOf(BrowseSort.LATEST),
+                // Status is the one filter every installed source understands.
+                status = true,
+            ),
             sources = library.installedSources(),
             // The capabilities are a set, whose order is not the order the UI shows: pick the
             // same sort the screen would start on, not whatever the set happened to yield.
-            sort = source.capabilities.sorts.minByOrNull { it.ordinal } ?: BrowseSort.LATEST,
+            sort = source?.capabilities?.sorts?.minByOrNull { it.ordinal } ?: BrowseSort.LATEST,
             tagId = null,
             tagName = null,
             genres = emptyList(),
@@ -286,33 +299,62 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val requestedSource = _browse.value.sourceId
         val requestedFilter = _browse.value.filter
         browseJob?.cancel()
+        allBrowseOffsets = emptyMap()
         _browse.value = _browse.value.copy(loading = true, error = null)
         browseJob = viewModelScope.launch {
-            runCatching {
-                library.browse(
-                    sourceId = requestedSource,
-                    sort = requestedSort,
-                    tagId = requestedTag,
-                    filter = requestedFilter,
-                    offset = 0,
-                    limit = BROWSE_PAGE,
-                )
+            if (requestedSource == ALL_SOURCES) {
+                runCatching {
+                    library.browseAll(
+                        sort = requestedSort,
+                        tagId = null,
+                        filter = BrowseFilter(status = requestedFilter.status),
+                        offsets = emptyMap(),
+                        limit = BROWSE_PAGE,
+                    )
+                }
+                    .onSuccess { page ->
+                        if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                            allBrowseOffsets = page.nextOffsets
+                            _browse.value = _browse.value.copy(
+                                manhwa = page.items,
+                                loading = false,
+                                endReached = page.exhausted,
+                                error = null,
+                            )
+                        }
+                    }
+                    .onFailure { error ->
+                        if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                            _browse.value = _browse.value.copy(loading = false, error = friendly(error))
+                        }
+                    }
+            } else {
+                runCatching {
+                    library.browse(
+                        sourceId = requestedSource,
+                        sort = requestedSort,
+                        tagId = requestedTag,
+                        filter = requestedFilter,
+                        offset = 0,
+                        limit = BROWSE_PAGE,
+                    )
+                }
+                    .onSuccess { items ->
+                        if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                            _browse.value = _browse.value.copy(
+                                manhwa = items,
+                                loading = false,
+                                endReached = items.size < BROWSE_PAGE,
+                                error = null,
+                            )
+                        }
+                    }
+                    .onFailure { error ->
+                        if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                            _browse.value = _browse.value.copy(loading = false, error = friendly(error))
+                        }
+                    }
             }
-                .onSuccess { items ->
-                    if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
-                        _browse.value = _browse.value.copy(
-                            manhwa = items,
-                            loading = false,
-                            endReached = items.size < BROWSE_PAGE,
-                            error = null,
-                        )
-                    }
-                }
-                .onFailure { error ->
-                    if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
-                        _browse.value = _browse.value.copy(loading = false, error = friendly(error))
-                    }
-                }
         }
     }
 
@@ -326,6 +368,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val offset = state.manhwa.size
         _browse.value = state.copy(loadingMore = true)
         viewModelScope.launch {
+            if (requestedSource == ALL_SOURCES) {
+                runCatching {
+                    library.browseAll(
+                        sort = requestedSort,
+                        tagId = null,
+                        filter = BrowseFilter(status = requestedFilter.status),
+                        offsets = allBrowseOffsets,
+                        limit = BROWSE_PAGE,
+                    )
+                }
+                    .onSuccess { page ->
+                        if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                            allBrowseOffsets = page.nextOffsets
+                            val current = _browse.value
+                            _browse.value = current.copy(
+                                manhwa = current.manhwa + page.items,
+                                loadingMore = false,
+                                endReached = page.exhausted,
+                            )
+                        }
+                    }
+                    .onFailure { error ->
+                        if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
+                            _browse.value = _browse.value.copy(loadingMore = false, error = friendly(error))
+                        }
+                    }
+                return@launch
+            }
+
             runCatching {
                 library.browse(requestedSource, requestedSort, requestedTag, requestedFilter, offset, BROWSE_PAGE)
             }
@@ -376,7 +447,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (!chaptersInFlight.add(manhwaId)) return
         viewModelScope.launch {
             try {
-                if (library.chaptersFor(manhwaId).isNotEmpty()) return@launch
+                if (library.chaptersFor(manhwaId).any { it.externalUrl == null }) return@launch
                 _chapterLoad.value = ChapterLoad(manhwaId, loading = true)
                 runCatching { library.refreshChapters(manhwaId) }
                     .onSuccess {
@@ -426,7 +497,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         matchJob = viewModelScope.launch {
             try {
                 val manhwa = container.db.manhwaDao().byId(manhwaId) ?: return@launch
-                if (library.chaptersFor(manhwaId).isNotEmpty()) return@launch
+                if (library.chaptersFor(manhwaId).any { it.externalUrl == null }) return@launch
                 // The search runs over every other source, which takes a moment; the profile says
                 // so rather than claiming, in the meantime, that nothing anywhere has the title.
                 _chapterLoad.value = ChapterLoad(manhwaId, matching = true)
@@ -495,16 +566,33 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _search.value = _search.value.copy(query = query)
     }
 
+    fun setSearchSource(sourceId: String) {
+        if (_search.value.sourceId == sourceId) return
+        _search.value = _search.value.copy(sourceId = sourceId, results = emptyList(), message = null)
+        runSearch(_search.value.query)
+    }
+
     fun runSearch(query: String) {
+        val requestedSource = _search.value.sourceId
         _search.value = _search.value.copy(query = query, loading = true, message = null)
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            runCatching { library.search(_browse.value.sourceId, query) }
+            runCatching {
+                if (requestedSource == ALL_SOURCES) {
+                    library.searchAll(query)
+                } else {
+                    library.search(requestedSource, query)
+                }
+            }
                 .onSuccess { results ->
-                    _search.value = _search.value.copy(results = results, loading = false)
+                    if (_search.value.sourceId == requestedSource) {
+                        _search.value = _search.value.copy(results = results, loading = false)
+                    }
                 }
                 .onFailure { error ->
-                    _search.value = _search.value.copy(loading = false, message = friendly(error))
+                    if (_search.value.sourceId == requestedSource) {
+                        _search.value = _search.value.copy(loading = false, message = friendly(error))
+                    }
                 }
         }
     }
@@ -586,11 +674,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             for (index in start until end) {
                 val page = pages[index] as? ReaderPage.Remote ?: continue
-                val height = (width / (page.aspectOrNull() ?: FALLBACK_PAGE_ASPECT)).toInt()
+                val pageWidth = if (page.width > 0) minOf(width, page.width) else width
+                val height = if (page.width > 0 && page.height > 0) {
+                    (pageWidth.toLong() * page.height / page.width).toInt()
+                } else {
+                    (pageWidth / (page.aspectOrNull() ?: FALLBACK_PAGE_ASPECT)).toInt()
+                }
+                // A 15,000 px strip is several tens of megabytes. Warming three of those would
+                // evict everything else and can exhaust the heap, so they warm on demand only.
+                if (height > MAX_PREFETCH_HEIGHT) continue
                 container.imageLoader.enqueue(
                     ImageRequest.Builder(getApplication())
                         .data(page.url)
-                        .size(width, height)
+                        .size(pageWidth, height)
+                        .precision(Precision.INEXACT)
                         .allowHardware(true)
                         .build(),
                 )
