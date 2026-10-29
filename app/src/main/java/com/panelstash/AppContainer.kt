@@ -19,12 +19,14 @@ import com.panelstash.source.AtHomeReporter
 import com.panelstash.source.FlameComicsSource
 import com.panelstash.source.KaynScansSource
 import com.panelstash.source.MangaDexSource
+import com.panelstash.source.MangaPillSource
 import com.panelstash.source.Network
 import com.panelstash.source.NyxScansSource
 import com.panelstash.source.OrionScansSource
 import com.panelstash.source.SourceGate
 import com.panelstash.source.SourceRegistry
 import com.panelstash.source.VortexScansSource
+import com.panelstash.source.WeebCentralSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,6 +65,8 @@ class AppContainer(context: Context) {
             OrionScansSource(apiClient, SourceGate()),
             KaynScansSource(apiClient, SourceGate()),
             FlameComicsSource(apiClient, SourceGate()),
+            WeebCentralSource(apiClient, SourceGate()),
+            MangaPillSource(apiClient, SourceGate()),
         ),
         // Read on every access, so switching a source off takes effect without a restart.
         disabled = { settings.current.disabledSourceIds },

@@ -59,6 +59,12 @@ object Network {
         host.endsWith("kaynscans.com") -> "https://kaynscans.com/"
         // Also covers cdn.flamecomics.xyz, which serves the pages.
         host.endsWith("flamecomics.xyz") -> "https://flamecomics.xyz/"
+        // Weeb Central serves pages and covers from its own storage hosts.
+        host.endsWith("weebcentral.com") -> "https://weebcentral.com/"
+        host.endsWith("planeptune.us") -> "https://weebcentral.com/"
+        host.endsWith("compsci88.com") -> "https://weebcentral.com/"
+        host.endsWith("mangapill.com") -> "https://mangapill.com/"
+        host.endsWith("readdetectiveconan.com") -> "https://mangapill.com/"
         else -> null
     }
 }

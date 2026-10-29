@@ -7,12 +7,12 @@
 ![Licence](https://img.shields.io/badge/licence-Apache_2.0-FB4B87?style=flat-square&labelColor=1B1D24)
 ![Platform](https://img.shields.io/badge/Android-8.0%2B%20%28API%2026%29-A97BFF?style=flat-square&labelColor=1B1D24)
 ![Stack](https://img.shields.io/badge/Kotlin_2.4-Compose-D45EC4?style=flat-square&labelColor=1B1D24)
-![Sources](https://img.shields.io/badge/sources-7-FB4B87?style=flat-square&labelColor=1B1D24)
+![Sources](https://img.shields.io/badge/sources-9-FB4B87?style=flat-square&labelColor=1B1D24)
 ![Version](https://img.shields.io/badge/version-0.2-A97BFF?style=flat-square&labelColor=1B1D24)
 
 </div>
 
-PanelStash is an Android app for reading manhwa. It renders chapters from seven catalogue sources, keeps your place across them, and saves chapters to the device so you can read with no connection at all. There is no account and no server: everything it knows lives on the phone.
+PanelStash is an Android app for reading manhwa. It renders chapters from nine catalogue sources, keeps your place across them, and saves chapters to the device so you can read with no connection at all. There is no account and no server: everything it knows lives on the phone.
 
 It is built for one hand and a slow connection. Pages arrive sized to the screen, a chapter reopens on the page you left, and a tap moves you forward a screenful.
 
@@ -80,8 +80,10 @@ Look:
 - Orion Scans: small catalogue, newest chapters free.
 - Kayn Scans: wide catalogue, though the newest chapters are often coin-locked.
 - Flame Comics: mostly manhwa, newest chapters free.
+- Weeb Central: big catalogue, and the chapter list arrives whole, so a 200 chapter run is one request.
+- Mangapill: large catalogue with its own genre filter, so Browse can be narrowed there without leaving the app.
 
-MangaDex is the only source with a documented API. The other six are scanlation sites that the app reads through the same endpoints and pages their own front ends use, so their payloads can change without warning. All seven sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter. Browse and search can also run across every source at once.
+MangaDex is the only source with a documented API. The other eight are scanlation sites that the app reads through the same endpoints and pages their own front ends use, so their payloads can change without warning. All seven sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter. Browse and search can also run across every source at once.
 
 A source declares what it can do, and the filter sheet only offers those controls:
 
