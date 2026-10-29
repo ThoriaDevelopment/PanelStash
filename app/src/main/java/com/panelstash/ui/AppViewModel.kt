@@ -1,6 +1,10 @@
 package com.panelstash.ui
 
+import android.Manifest
 import android.app.Application
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import coil3.request.ImageRequest
@@ -12,6 +16,7 @@ import com.panelstash.data.ReaderPage
 import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.ContinueRow
 import com.panelstash.data.db.DownloadState
+import com.panelstash.data.db.FollowRow
 import com.panelstash.data.db.ManhwaEntity
 import com.panelstash.source.BrowseFilter
 import com.panelstash.source.BrowseSort
@@ -22,6 +27,7 @@ import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -32,7 +38,22 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 private const val BROWSE_PAGE = 30
+private const val SEARCH_PAGE = 30
 private const val PREFETCH_AHEAD = 3
+
+/** Typing is searched after this pause, so a name is one request instead of one per letter. */
+private const val SEARCH_DEBOUNCE_MS = 350L
+
+/** One letter matches nearly everything, so a search waits for the second. */
+private const val MIN_QUERY = 2
+
+private const val MAX_RECENT_SEARCHES = 6
+
+/** A chapter scroll writes its resume point at most this often. */
+private const val PROGRESS_WRITE_DELAY_MS = 600L
+
+/** A stored chapter list older than this is refreshed when its profile is opened. */
+private const val CHAPTER_REFRESH_MS = 6 * 60 * 60 * 1000L
 
 /** Taller pages skip prefetching; they decode slowly and would crowd the memory cache. */
 private const val MAX_PREFETCH_HEIGHT = 8_192
@@ -66,7 +87,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val continueReading: StateFlow<List<ContinueRow>> = library.observeContinueReading()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val followed: StateFlow<List<ManhwaEntity>> = library.observeFollowed()
+    val followed: StateFlow<List<FollowRow>> = library.observeFollowed()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val readLater: StateFlow<List<ManhwaEntity>> = library.observeReadLater()
@@ -99,6 +120,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _browse = MutableStateFlow(BrowseState())
     val browse: StateFlow<BrowseState> = _browse
 
+    private val _discovery = MutableStateFlow(DiscoveryState())
+    val discovery: StateFlow<DiscoveryState> = _discovery
+
+    private val _similar = MutableStateFlow(SimilarState())
+    val similar: StateFlow<SimilarState> = _similar
+
+    /** Genres published with a title, loaded once per profile and shown as chips. */
+    private val _profileGenres = MutableStateFlow<Map<Long, List<SourceGenre>>>(emptyMap())
+    val profileGenres: StateFlow<Map<Long, List<SourceGenre>>> = _profileGenres
+
     private val _librarySection = MutableStateFlow(LibrarySection.FOLLOWING)
     val librarySection: StateFlow<LibrarySection> = _librarySection
 
@@ -111,15 +142,28 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val _search = MutableStateFlow(SearchState())
     val search: StateFlow<SearchState> = _search
 
+    private val _recentSearches = MutableStateFlow(settings.current.recentSearches)
+    val recentSearches: StateFlow<List<String>> = _recentSearches
+
     private val _reader = MutableStateFlow<ReaderState?>(null)
     val reader: StateFlow<ReaderState?> = _reader
 
     private val _message = MutableStateFlow<String?>(null)
     val message: StateFlow<String?> = _message
 
+    /** Set when a download starts without notification permission, so the prompt has context. */
+    private val _notificationPrompt = MutableStateFlow(false)
+    val notificationPrompt: StateFlow<Boolean> = _notificationPrompt
+
     private var searchJob: Job? = null
+    private var progressJob: Job? = null
+    private var searchDebounceJob: Job? = null
+    /** Per-source offsets while the search is showing every installed source. */
+    private var searchOffsets: Map<String, Int> = emptyMap()
     private var readerJob: Job? = null
     private var browseJob: Job? = null
+    private var discoveryJob: Job? = null
+    private var similarJob: Job? = null
     private var matchJob: Job? = null
     private var genresRequestedFor: String? = null
     private var prefetchedUpTo = -1
@@ -204,6 +248,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun installedSources(): List<Source> = library.installedSources()
 
+    fun allSources(): List<Source> = library.allSources()
+
+    /**
+     * Turns a source on or off. One source always stays on, so Browse is never left without a
+     * catalogue; switching the default off moves the default to whatever is still enabled.
+     */
+    fun setSourceEnabled(sourceId: String, enabled: Boolean) {
+        val off = settings.current.disabledSourceIds
+        val next = if (enabled) off - sourceId else off + sourceId
+        if (library.allSources().none { it.id !in next }) return
+        settings.update { it.copy(disabledSourceIds = next) }
+
+        val remaining = library.installedSources()
+        _browse.value = _browse.value.copy(sources = remaining)
+        if (!enabled) {
+            remaining.firstOrNull()?.let { first ->
+                if (settings.current.defaultSourceId == sourceId) {
+                    settings.update { it.copy(defaultSourceId = first.id) }
+                }
+            }
+            if (_browse.value.sourceId == sourceId) {
+                setBrowseSource(remaining.firstOrNull()?.id ?: ALL_SOURCES)
+            }
+        }
+        container.discovery.invalidate()
+        refreshDiscovery(force = true)
+    }
+
     fun clearImageCache() {
         viewModelScope.launch(Dispatchers.IO) { container.clearImageCache() }
         _message.value = "Image cache cleared"
@@ -223,6 +295,72 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun primeBrowse() {
         loadGenres()
         if (_browse.value.manhwa.isEmpty() && !_browse.value.loading) refreshBrowse()
+        refreshDiscovery()
+    }
+
+    /**
+     * The rails above the grid. Cheap after the first call: the repository caches them until the
+     * reader picks up something new, and a failure simply leaves the grid on its own.
+     */
+    fun refreshDiscovery(force: Boolean = false) {
+        if (discoveryJob?.isActive == true) return
+        if (force) container.discovery.invalidate()
+        _discovery.value = _discovery.value.copy(loading = true)
+        discoveryJob = viewModelScope.launch {
+            runCatching { container.discovery.rails(force = force) }
+                .onSuccess { rails -> _discovery.value = DiscoveryState(loading = false, rails = rails) }
+                .onFailure { _discovery.value = _discovery.value.copy(loading = false) }
+        }
+    }
+
+    /**
+     * The titles shown under "Similar" on a profile. Loaded when that tab is first opened, so a
+     * profile the reader only uses to pick a chapter costs no extra request.
+     */
+    fun loadSimilar(manhwaId: Long, force: Boolean = false) {
+        val current = _similar.value
+        if (!force && current.manhwaId == manhwaId && (current.loading || current.attempted)) return
+        similarJob?.cancel()
+        _similar.value = SimilarState(manhwaId = manhwaId, loading = true)
+        similarJob = viewModelScope.launch {
+            runCatching { container.discovery.similar(manhwaId, force = force) }
+                .onSuccess { cards ->
+                    _similar.value = SimilarState(
+                        manhwaId = manhwaId,
+                        loading = false,
+                        attempted = true,
+                        cards = cards,
+                    )
+                }
+                .onFailure {
+                    _similar.value = SimilarState(manhwaId = manhwaId, loading = false, attempted = true)
+                }
+        }
+    }
+
+    /** The genres a title was filed under, for the chips on its profile. */
+    fun loadGenresFor(manhwaId: Long) {
+        if (_profileGenres.value.containsKey(manhwaId)) return
+        viewModelScope.launch {
+            val manhwa = library.manhwa(manhwaId) ?: return@launch
+            val source = library.source(manhwa.sourceId) ?: return@launch
+            // Reading a title's genres asks for the detail page, so it is skipped only on the
+            // sources known never to publish them.
+            val reports = source.capabilities.titleGenres || source.capabilities.genres
+            val genres = if (reports) {
+                runCatching { source.manhwa(manhwa.remoteId) }.getOrNull()?.genres.orEmpty()
+            } else {
+                emptyList()
+            }
+            _profileGenres.value = _profileGenres.value + (manhwaId to genres)
+        }
+    }
+
+    /** Opens Browse filtered to a genre the profile was filed under. */
+    fun openGenre(sourceId: String, genre: SourceGenre) {
+        if (_browse.value.sourceId != sourceId) setBrowseSource(sourceId)
+        setBrowseGenre(genre)
+        selectTab(Screen.Browse)
     }
 
     private fun loadGenres() {
@@ -441,13 +579,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Loads the chapter list the first time a manhwa is opened, and records why it failed so the
-     * profile can show it instead of an empty list.
+     * profile can show it instead of an empty list. A list that is already stored but old is
+     * refreshed quietly, so a followed title eventually shows its new chapters.
      */
     fun ensureChapters(manhwaId: Long) {
         if (!chaptersInFlight.add(manhwaId)) return
         viewModelScope.launch {
             try {
-                if (library.chaptersFor(manhwaId).any { it.externalUrl == null }) return@launch
+                val stored = library.chaptersFor(manhwaId)
+                val readable = stored.any { it.externalUrl == null }
+                val fetchedAt = library.manhwa(manhwaId)?.lastFetchedAt ?: 0
+                val stale = System.currentTimeMillis() - fetchedAt > CHAPTER_REFRESH_MS
+                if (readable && !stale) return@launch
+                if (readable) {
+                    // Something is readable already, so a failed refresh stays silent.
+                    runCatching { library.refreshChapters(manhwaId) }
+                    return@launch
+                }
                 _chapterLoad.value = ChapterLoad(manhwaId, loading = true)
                 runCatching { library.refreshChapters(manhwaId) }
                     .onSuccess {
@@ -562,8 +710,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- search -----------------------------------------------------------
 
+    /**
+     * Typing searches on its own: the list follows the field after a short pause, so the search
+     * key is an option rather than a requirement. Blank goes back to the ranking list.
+     */
     fun setQuery(query: String) {
         _search.value = _search.value.copy(query = query)
+        searchDebounceJob?.cancel()
+        if (query.isBlank()) {
+            if (_search.value.results.isEmpty() && !_search.value.loading) runSearch("")
+            return
+        }
+        if (query.trim().length < MIN_QUERY) return
+        searchDebounceJob = viewModelScope.launch {
+            delay(SEARCH_DEBOUNCE_MS)
+            runSearch(query.trim())
+        }
     }
 
     fun setSearchSource(sourceId: String) {
@@ -572,21 +734,42 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         runSearch(_search.value.query)
     }
 
+    fun clearSearch() {
+        searchDebounceJob?.cancel()
+        _search.value = _search.value.copy(query = "")
+        runSearch("")
+    }
+
     fun runSearch(query: String) {
         val requestedSource = _search.value.sourceId
-        _search.value = _search.value.copy(query = query, loading = true, message = null)
+        val requestedQuery = query.trim()
+        searchDebounceJob?.cancel()
         searchJob?.cancel()
+        searchOffsets = emptyMap()
+        _search.value = _search.value.copy(
+            query = query,
+            loading = true,
+            loadingMore = false,
+            endReached = false,
+            message = null,
+        )
         searchJob = viewModelScope.launch {
             runCatching {
                 if (requestedSource == ALL_SOURCES) {
-                    library.searchAll(query)
+                    library.searchAll(requestedQuery, emptyMap(), SEARCH_PAGE)
                 } else {
-                    library.search(requestedSource, query)
+                    library.search(requestedSource, requestedQuery, offset = 0, limit = SEARCH_PAGE)
                 }
             }
-                .onSuccess { results ->
+                .onSuccess { page ->
                     if (_search.value.sourceId == requestedSource) {
-                        _search.value = _search.value.copy(results = results, loading = false)
+                        searchOffsets = page.nextOffsets
+                        _search.value = _search.value.copy(
+                            results = page.items,
+                            loading = false,
+                            endReached = page.exhausted,
+                        )
+                        if (requestedQuery.isNotBlank()) rememberSearch(requestedQuery)
                     }
                 }
                 .onFailure { error ->
@@ -595,6 +778,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
         }
+    }
+
+    /** The next page of a search, which continues every source rather than replaying the first. */
+    fun loadMoreSearch() {
+        val state = _search.value
+        if (state.loading || state.loadingMore || state.endReached) return
+        val requestedSource = state.sourceId
+        val query = state.query.trim()
+        _search.value = state.copy(loadingMore = true)
+        searchJob = viewModelScope.launch {
+            runCatching {
+                if (requestedSource == ALL_SOURCES) {
+                    library.searchAll(query, searchOffsets, SEARCH_PAGE)
+                } else {
+                    val offset = searchOffsets[requestedSource] ?: 0
+                    library.search(requestedSource, query, offset, SEARCH_PAGE)
+                }
+            }
+                .onSuccess { page ->
+                    val current = _search.value
+                    if (current.sourceId != requestedSource) return@onSuccess
+                    searchOffsets = page.nextOffsets
+                    _search.value = current.copy(
+                        results = current.results + page.items,
+                        loadingMore = false,
+                        endReached = page.exhausted,
+                    )
+                }
+                .onFailure { error ->
+                    _search.value = _search.value.copy(loadingMore = false, message = friendly(error))
+                }
+        }
+    }
+
+    private fun rememberSearch(query: String) {
+        val next = (listOf(query) + _recentSearches.value.filterNot { it.equals(query, true) })
+            .take(MAX_RECENT_SEARCHES)
+        _recentSearches.value = next
+        settings.update { it.copy(recentSearches = next) }
+    }
+
+    fun clearRecentSearches() {
+        _recentSearches.value = emptyList()
+        settings.update { it.copy(recentSearches = emptyList()) }
     }
 
     // --- reader -----------------------------------------------------------
@@ -641,7 +868,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         pages = pages,
                         startPage = resolved,
                         nextChapterId = library.nextChapter(manhwa.id, chapter.id)?.id,
-                        previousChapterId = library.previousChapter(manhwa.id, chapter.id)?.id,
                     )
                     prefetch(pages, resolved)
                 }
@@ -695,25 +921,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openNeighbour(chapterId: Long?) {
-        if (chapterId == null) {
-            _message.value = "Nothing there"
-            return
-        }
-        stack.value = stack.value.dropLast(1)
-        openChapter(chapterId, 0)
-    }
-
+    /**
+     * Scrolling reports every page it passes. The write is coalesced, so a fast scroll costs one
+     * row update instead of one per page, and the last position always lands because the write
+     * happens in the view-model's scope, which outlives the reader.
+     */
     fun saveProgress(manhwaId: Long, chapterId: Long, pageIndex: Int) {
-        viewModelScope.launch { library.saveResume(manhwaId, chapterId, pageIndex) }
+        progressJob?.cancel()
+        progressJob = viewModelScope.launch {
+            delay(PROGRESS_WRITE_DELAY_MS)
+            library.saveResume(manhwaId, chapterId, pageIndex)
+        }
     }
 
     fun markFinished(chapterId: Long) {
+        container.discovery.invalidateAfterReading()
         viewModelScope.launch { library.markRead(chapterId, read = true) }
     }
 
     /** Manual read/unread from the chapter list, without opening the chapter. */
     fun setChapterRead(chapterId: Long, read: Boolean) {
+        container.discovery.invalidateAfterReading()
         viewModelScope.launch { library.markRead(chapterId, read) }
     }
 
@@ -739,6 +967,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun download(chapters: List<ChapterEntity>, manhwa: ManhwaEntity, metered: Boolean) {
         val quality = settings.current.downloadQuality
+        askForNotificationsOnce()
         viewModelScope.launch {
             for (chapter in chapters) {
                 container.downloads.markQueued(manhwa.id, chapter.id, quality, metered)
@@ -749,6 +978,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 "Downloading ${chapters.size} chapters"
             }
+        }
+    }
+
+    /** The permission is asked for when it first matters: the reader started a download. */
+    private fun askForNotificationsOnce() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            getApplication(),
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) _notificationPrompt.value = true
+    }
+
+    fun clearNotificationPrompt() {
+        _notificationPrompt.value = false
+    }
+
+    /** Removes every downloaded chapter of a title, files included, and cancels any still queued. */
+    fun deleteAllDownloads(manhwaId: Long) {
+        viewModelScope.launch {
+            for (chapterId in container.downloads.chapterIdsFor(manhwaId)) {
+                container.scheduler.cancel(chapterId)
+                container.reader.invalidate(chapterId)
+            }
+            container.downloads.deleteAllForManhwa(manhwaId)
+            _message.value = "Downloads deleted"
         }
     }
 

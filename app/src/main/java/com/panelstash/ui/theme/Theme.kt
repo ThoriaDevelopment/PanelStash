@@ -68,9 +68,12 @@ object Palette {
 
     val AccentGradient: List<Color> get() = listOf(Accent, AccentAlt)
 
-    /** The accent as a fill behind selected controls. */
-    fun accentFill(alpha: Float = 0.24f): Color = Accent.copy(alpha = alpha)
-    fun accentAltFill(alpha: Float = 0.14f): Color = AccentAlt.copy(alpha = alpha)
+    /**
+     * The accent as a fill behind selected controls. Lighter on a light canvas: the same wash
+     * would leave pink-on-pink text and a selected label at about 3:1.
+     */
+    fun accentFill(alpha: Float = if (IsLight) 0.12f else 0.24f): Color = Accent.copy(alpha = alpha)
+    fun accentAltFill(alpha: Float = if (IsLight) 0.08f else 0.14f): Color = AccentAlt.copy(alpha = alpha)
 
     /** The accent as a hairline around a selected control. */
     fun accentEdge(alpha: Float = 0.4f): Color = Accent.copy(alpha = alpha)

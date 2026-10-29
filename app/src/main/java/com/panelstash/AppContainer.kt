@@ -7,6 +7,7 @@ import coil3.disk.directory
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import coil3.request.crossfade
+import com.panelstash.data.DiscoveryRepository
 import com.panelstash.data.LibraryRepository
 import com.panelstash.data.ReaderRepository
 import com.panelstash.data.Settings
@@ -15,6 +16,7 @@ import com.panelstash.download.DownloadScheduler
 import com.panelstash.download.DownloadStore
 import com.panelstash.source.AsuraScansSource
 import com.panelstash.source.AtHomeReporter
+import com.panelstash.source.FlameComicsSource
 import com.panelstash.source.KaynScansSource
 import com.panelstash.source.MangaDexSource
 import com.panelstash.source.Network
@@ -53,17 +55,21 @@ class AppContainer(context: Context) {
     private val apiClient = Network.apiClient()
 
     val sources = SourceRegistry(
-        listOf(
+        sources = listOf(
             MangaDexSource(apiClient, SourceGate()),
             AsuraScansSource(apiClient, SourceGate()),
             VortexScansSource(apiClient, SourceGate()),
             NyxScansSource(apiClient, SourceGate()),
             OrionScansSource(apiClient, SourceGate()),
             KaynScansSource(apiClient, SourceGate()),
+            FlameComicsSource(apiClient, SourceGate()),
         ),
+        // Read on every access, so switching a source off takes effect without a restart.
+        disabled = { settings.current.disabledSourceIds },
     )
 
     val library = LibraryRepository(sources, db)
+    val discovery = DiscoveryRepository(library)
     val downloads = DownloadStore(appContext, db, scope)
     val reader = ReaderRepository(sources, downloads, settings)
     val scheduler = DownloadScheduler(appContext)
@@ -95,6 +101,10 @@ class AppContainer(context: Context) {
         // Off the main thread: it is a directory walk, and this runs while the first screen is
         // being drawn.
         scope.launch { downloads.clearStaleTrash() }
+        // A download interrupted by the process dying would otherwise read "downloading" for ever.
+        scope.launch { downloads.resetInterrupted() }
+        // Catalogue rows nobody read, followed or saved are not worth keeping indefinitely.
+        scope.launch { library.pruneCatalogue() }
     }
 
     /**

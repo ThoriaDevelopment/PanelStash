@@ -18,6 +18,29 @@ class VortexMappingTest {
         ]}}
     """.trimIndent()
 
+    /** Captured from /api/query on 2026-10-29, cut down to the fields we read. */
+    private val cataloguePayload = """
+        {"posts":[
+          {"id":706,"slug":"the-wizards-notes","postTitle":"The Wizard's Notes","seriesType":"MANHWA",
+           "seriesStatus":"ONGOING","isNovel":false,
+           "genres":[{"id":1,"name":"Action","color":""},{"id":8,"name":"Fantasy","color":""}],
+           "chapters":[{"slug":"chapter-12","number":12}]},
+          {"id":707,"slug":"announced-but-empty","postTitle":"Announced But Empty","seriesType":"MANHWA",
+           "seriesStatus":"ONGOING","isNovel":false,"genres":[],"chapters":[]},
+          {"id":708,"slug":"a-novel","postTitle":"A Novel","seriesType":"NOVEL",
+           "seriesStatus":"ONGOING","isNovel":true,"chapters":[{"slug":"chapter-1","number":1}]}
+        ],"totalCount":484}
+    """.trimIndent()
+
+    @Test
+    fun `the catalogue drops empty series and novels and keeps each title's genres`() {
+        val manhwa = json.decodeFromString<VortexQueryResponse>(cataloguePayload).posts.toSourceManhwa()
+
+        assertEquals(listOf("The Wizard's Notes"), manhwa.map { it.title })
+        assertEquals(listOf("Action", "Fantasy"), manhwa.single().genres.map { it.name })
+        assertEquals(listOf("1", "8"), manhwa.single().genres.map { it.id })
+    }
+
     @Test
     fun `chapters keep their series-scoped identity`() {
         val chapters = json.decodeFromString<VortexChaptersResponse>(payload).post!!.chapters

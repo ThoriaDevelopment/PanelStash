@@ -19,8 +19,21 @@ internal fun MangaDto.toSourceManhwa(): SourceManhwa {
         coverUrl = coverFile?.let { "https://uploads.mangadex.org/covers/$id/$it.256.jpg" },
         year = attributes.year,
         status = attributes.status,
+        genres = sourceGenres(),
     )
 }
+
+/**
+ * The title's tags, with the real genres ahead of themes and formats. The first entry is what a
+ * "more like this" row is built from, so "Romance" has to outrank "Full Colour".
+ */
+internal fun MangaDto.sourceGenres(): List<SourceGenre> =
+    attributes.tags
+        .sortedBy { if (it.attributes.group == "genre") 0 else 1 }
+        .mapNotNull { tag ->
+            val name = tag.attributes.name["en"] ?: tag.attributes.name.values.firstOrNull()
+            if (tag.id.isBlank() || name.isNullOrBlank()) null else SourceGenre(tag.id, name)
+        }
 
 /**
  * Returns null only for chapters that cannot be represented at all: no number, unavailable, or

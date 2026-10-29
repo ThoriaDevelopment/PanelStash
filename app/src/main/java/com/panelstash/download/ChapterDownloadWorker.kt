@@ -7,7 +7,9 @@ import com.panelstash.PanelStashApp
 import com.panelstash.source.PageQuality
 import com.panelstash.source.SourceError
 import com.panelstash.source.shortLabel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import okhttp3.Request
 import java.io.File
@@ -66,8 +68,17 @@ class ChapterDownloadWorker(
             container.downloads.complete(manhwa.id, chapterId, dir, written, quality)
             DownloadNotifications.notifyDone(applicationContext, manhwa.title, chapter.numberText)
             Result.success()
+        } catch (cancelled: CancellationException) {
+            // WorkManager stopped the job: the process died, the constraints were lost, or the
+            // download was cancelled. Close the row out, or it reads "downloading" for ever.
+            withContext(NonCancellable) {
+                container.downloads.fail(manhwa.id, chapterId, dir, quality, "Cancelled")
+                DownloadNotifications.notifyFailed(applicationContext, manhwa.title, chapter.numberText)
+            }
+            throw cancelled
         } catch (error: SourceError) {
             container.downloads.fail(manhwa.id, chapterId, dir, quality, error.shortLabel())
+            DownloadNotifications.notifyFailed(applicationContext, manhwa.title, chapter.numberText)
             when (error) {
                 is SourceError.RateLimited -> Result.retry()
                 is SourceError.Banned -> Result.retry()
@@ -77,9 +88,11 @@ class ChapterDownloadWorker(
             }
         } catch (error: Exception) {
             container.downloads.fail(manhwa.id, chapterId, dir, quality, "Failed")
+            DownloadNotifications.notifyFailed(applicationContext, manhwa.title, chapter.numberText)
             Result.retry()
         }
     }
+
 
     companion object {
         const val KEY_CHAPTER_ID = "chapter_id"

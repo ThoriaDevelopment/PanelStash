@@ -2,6 +2,7 @@ package com.panelstash.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -32,13 +33,16 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.panelstash.data.DiscoveryRail
 import com.panelstash.data.Preferences
 import com.panelstash.source.BrowseFilter
 import com.panelstash.source.SourceGenre
@@ -73,13 +77,33 @@ fun BrowseScreen(vm: AppViewModel) {
     val state by vm.browse.collectAsState()
     val preferences by vm.preferences.collectAsState()
     val gridState = rememberLazyGridState()
+    val discovery by vm.discovery.collectAsState()
     var showFilters by remember { mutableStateOf(false) }
     var showSources by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { vm.primeBrowse() }
 
     // A new sort, genre, filter or source is a new list, so the grid starts at the top again.
-    LaunchedEffect(state.sort, state.tagId, state.filter, state.sourceId) { gridState.scrollToItem(0) }
+    // The previous key is remembered so returning from a profile, which re-enters this screen
+    // with the same key, keeps the reader where they were.
+    val browseKey = listOf(state.sort, state.tagId, state.filter, state.sourceId).toString()
+    var lastBrowseKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(browseKey) {
+        if (lastBrowseKey != null && lastBrowseKey != browseKey) gridState.scrollToItem(0)
+        lastBrowseKey = browseKey
+    }
+
+    // Rails arrive a moment after the grid. Inserting them above the first poster keeps that
+    // poster in place, which would leave the new rails hidden above the viewport.
+    LaunchedEffect(discovery.rails.size) {
+        if (
+            discovery.rails.isNotEmpty() &&
+            gridState.firstVisibleItemIndex <= discovery.rails.size &&
+            gridState.firstVisibleItemScrollOffset == 0
+        ) {
+            gridState.scrollToItem(0)
+        }
+    }
 
     LaunchedEffect(gridState, state.manhwa.size) {
         snapshotFlow { gridState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
@@ -113,9 +137,21 @@ fun BrowseScreen(vm: AppViewModel) {
                         color = Palette.Ink,
                     )
                 }
-                IconButton(Glyph.Settings, { vm.push(Screen.Settings) }, size = 38.dp)
+                IconButton(
+                    Glyph.Settings,
+                    { vm.push(Screen.Settings) },
+                    size = 38.dp,
+                    label = "Settings",
+                )
                 Spacer(Modifier.width(8.dp))
-                IconButton(Glyph.Refresh, { vm.refreshBrowse() })
+                IconButton(
+                    Glyph.Refresh,
+                    {
+                        vm.refreshBrowse()
+                        vm.refreshDiscovery(force = true)
+                    },
+                    label = "Refresh catalogue",
+                )
             }
             Spacer(Modifier.height(14.dp))
             SearchPill(value = "", onOpen = { vm.push(Screen.Search) })
@@ -172,12 +208,24 @@ fun BrowseScreen(vm: AppViewModel) {
             }
         }
 
+        // Rails are global: they do not honour the genre chips or the filter sheet above them,
+        // so showing them under an active filter reads as if they did.
+        val filtered = state.filter.isActive || state.tagId != null
+        val rails = if (filtered) emptyList() else discovery.rails
+        // An empty or filtered grid can still sit under the rails, so the grid is not replaced
+        // by an empty state while there is something above it.
+        val hasRails = rails.isNotEmpty()
         val showInitialLoad = state.loading && state.manhwa.isEmpty()
         val showError = state.error != null && state.manhwa.isEmpty()
+        val emptyMessage = when {
+            state.tagName != null -> "No manhwa in ${state.tagName} on ${state.sourceName} yet."
+            state.filter.isActive -> "${state.sourceName} returned nothing for this filter."
+            else -> "${state.sourceName} returned an empty catalogue."
+        }
 
         when {
-            showInitialLoad -> SkeletonGrid(columns)
-            showError -> EmptyState(
+            showInitialLoad && !hasRails -> SkeletonGrid(columns)
+            showError && !hasRails -> EmptyState(
                 glyph = Glyph.Refresh,
                 title = "Could not load the catalogue",
                 message = state.error,
@@ -186,14 +234,10 @@ fun BrowseScreen(vm: AppViewModel) {
                 modifier = Modifier.padding(top = 24.dp),
             )
 
-            state.manhwa.isEmpty() -> EmptyState(
+            state.manhwa.isEmpty() && !state.loading && !hasRails -> EmptyState(
                 glyph = Glyph.Compass,
                 title = "Nothing to browse here",
-                message = when {
-                    state.tagName != null -> "No manhwa in ${state.tagName} on ${state.sourceName} yet."
-                    state.filter.isActive -> "${state.sourceName} returned nothing for this filter."
-                    else -> "${state.sourceName} returned an empty catalogue."
-                },
+                message = emptyMessage,
                 actionText = if (state.filter.isActive) "Clear filters" else null,
                 onAction = {
                     if (state.filter.isActive) vm.setBrowseFilter(BrowseFilter.None)
@@ -209,7 +253,38 @@ fun BrowseScreen(vm: AppViewModel) {
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
             ) {
-                if (state.error != null) {
+                items(
+                    items = rails,
+                    key = { "rail-${it.key}" },
+                    span = { GridItemSpan(maxLineSpan) },
+                ) { rail ->
+                    DiscoveryRailRow(
+                        rail = rail,
+                        onOpen = { vm.openProfile(it) },
+                        onGenre = { sourceId, genre -> vm.openGenre(sourceId, genre) },
+                    )
+                }
+                if (state.manhwa.isEmpty() && !state.loading) {
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "empty") {
+                        EmptyState(
+                            glyph = if (showError) Glyph.Refresh else Glyph.Compass,
+                            title = if (showError) "Could not load the catalogue" else "Nothing to browse here",
+                            message = state.error ?: emptyMessage,
+                            actionText = when {
+                                showError -> "Try again"
+                                state.filter.isActive -> "Clear filters"
+                                else -> null
+                            },
+                            onAction = {
+                                when {
+                                    showError -> vm.refreshBrowse()
+                                    state.filter.isActive -> vm.setBrowseFilter(BrowseFilter.None)
+                                }
+                            },
+                        )
+                    }
+                }
+                if (state.error != null && state.manhwa.isNotEmpty()) {
                     item(span = { GridItemSpan(maxLineSpan) }, key = "error") {
                         GlassCard(
                             shape = RoundedCornerShape(20.dp),
@@ -267,7 +342,11 @@ fun BrowseScreen(vm: AppViewModel) {
         onDismiss = { showSources = false },
         title = "Source",
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        // The list scrolls: the sheet is height-capped, and every installed source gets a card.
+        Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             val allSelected = state.sourceId == ALL_SOURCES
             GlassCard(
                 modifier = Modifier
@@ -463,6 +542,76 @@ private fun FilterSheet(
                 "Filters are remembered, and only apply to a source that supports them.",
                 Modifier.padding(horizontal = 4.dp).padding(bottom = 6.dp),
             )
+        }
+    }
+}
+
+/**
+ * One rail above the grid. The heading says why these titles are here, because a recommendation
+ * the reader cannot account for is just more scrolling.
+ */
+@Composable
+private fun DiscoveryRailRow(
+    rail: DiscoveryRail,
+    onOpen: (Long) -> Unit,
+    onGenre: (String, SourceGenre) -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Eyebrow(rail.eyebrow)
+        Text(
+            text = rail.title,
+            style = MaterialTheme.typography.titleLarge,
+            color = Palette.Ink,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        if (rail.subtitle != null) {
+            Text(
+                text = rail.subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.InkSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 1.dp),
+            )
+        }
+        // A row that names a genre can be followed into the catalogue filtered to it.
+        val genre = rail.genre
+        val genreSourceId = rail.genreSourceId
+        if (genre != null && genreSourceId != null) {
+            Chip(
+                text = genre.name,
+                selected = false,
+                onClick = { onGenre(genreSourceId, genre) },
+                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        // Three posters fit the row exactly. A fixed 128dp card left the third one cut in half
+        // by the screen edge, which read as a clipped layout rather than a row to scroll.
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val cardWidth = (maxWidth - 20.dp) / 3
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(top = 10.dp, bottom = 2.dp),
+            ) {
+                items(rail.cards, key = { it.manhwa.id }) { card ->
+                    Column(Modifier.width(cardWidth)) {
+                        PosterCard(
+                            title = card.manhwa.title,
+                            coverUrl = card.manhwa.coverUrl,
+                            badge = card.badge,
+                            onClick = { onOpen(card.manhwa.id) },
+                        )
+                        if (card.caption != null) {
+                            Eyebrow(
+                                card.caption,
+                                Modifier.padding(top = 6.dp, start = 2.dp).fillMaxWidth(),
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }

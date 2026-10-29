@@ -8,6 +8,17 @@ data class SourceManhwa(
     val coverUrl: String?,
     val year: Int?,
     val status: String?,
+    /**
+     * Genres as this source publishes them on the title itself. Empty on the sources that only
+     * expose them as a browse filter, and on catalogue rows that do not carry them.
+     */
+    val genres: List<SourceGenre> = emptyList(),
+    /**
+     * How many chapters the source says the title has, when it says. Used to prefer the complete
+     * copy of a title that two sources both publish; a source that does not report it leaves this
+     * null rather than guessing from the handful of chapters on a catalogue row.
+     */
+    val chapterCount: Int? = null,
 )
 
 /** A chapter as delivered by a source. */
@@ -90,6 +101,12 @@ data class BrowseFilter(
 data class SourceCapabilities(
     val sorts: Set<BrowseSort> = setOf(BrowseSort.LATEST),
     val genres: Boolean = false,
+    /**
+     * Every title reports the genres it was filed under. Separate from [genres], which means the
+     * catalogue can be *filtered* by one: a site can publish genres on a title yet ignore every
+     * filter parameter, and then the profile can show chips while Browse shows none.
+     */
+    val titleGenres: Boolean = false,
     val status: Boolean = false,
     val year: Boolean = false,
     val safeOnly: Boolean = false,

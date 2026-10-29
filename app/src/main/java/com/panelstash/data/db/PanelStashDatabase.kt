@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import java.io.File
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
@@ -46,6 +47,19 @@ abstract class PanelStashDatabase : RoomDatabase() {
                     "panelstash.db",
                 )
                     .addMigrations(MIGRATION_1_2)
+                    .addCallback(object : Callback() {
+                        /**
+                         * A destructive fallback drops every row, which leaves the downloaded
+                         * chapter files and the image cache with nothing pointing at them. They
+                         * are cleared here so the app does not silently keep the space forever.
+                         */
+                        override fun onDestructiveMigration(db: SupportSQLiteDatabase) {
+                            runCatching {
+                                File(context.filesDir, "downloads").deleteRecursively()
+                                File(context.cacheDir, "images").deleteRecursively()
+                            }
+                        }
+                    })
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { instance = it }

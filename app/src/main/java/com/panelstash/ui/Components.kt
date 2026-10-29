@@ -1,5 +1,7 @@
 package com.panelstash.ui
 
+import android.os.Environment
+import android.os.StatFs
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
@@ -78,12 +80,17 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import com.panelstash.ui.theme.Palette
@@ -103,6 +110,11 @@ fun Modifier.glass(
     shape: androidx.compose.ui.graphics.Shape,
     strong: Boolean = false,
     elevation: Dp = 10.dp,
+    /**
+     * An opaque wash under the film. Cards float over other content and want to see through;
+     * a sheet covers the page and must not, or the page's text reads through it.
+     */
+    base: Color? = null,
 ): Modifier = this
     .shadow(
         elevation = elevation,
@@ -112,6 +124,7 @@ fun Modifier.glass(
         spotColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.24f else 0.6f),
     )
     .clip(shape)
+    .then(if (base != null) Modifier.background(base) else Modifier)
     .background(
         Brush.linearGradient(
             colors = if (strong) {
@@ -175,6 +188,8 @@ fun Modifier.pressable(
     enabled: Boolean = true,
     scaleDown: Float = 0.96f,
     haptics: Boolean = true,
+    /** What a screen reader announces for a control that is only a glyph or a poster. */
+    label: String? = null,
 ): Modifier = composed {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -192,6 +207,15 @@ fun Modifier.pressable(
         scaleX = scale
         scaleY = scale
     }.then(
+        if (label != null) {
+            Modifier.semantics {
+                contentDescription = label
+                role = Role.Button
+            }
+        } else {
+            Modifier
+        },
+    ).then(
         if (onLongClick != null) {
             Modifier.combinedClickable(
                 interactionSource = interaction,
@@ -436,11 +460,12 @@ fun IconButton(
     size: Dp = 38.dp,
     tint: Color = Palette.Ink,
     strong: Boolean = false,
+    label: String? = null,
 ) {
     Box(
         modifier = modifier
             .size(size)
-            .pressable(onClick, scaleDown = 0.9f)
+            .pressable(onClick, scaleDown = 0.9f, label = label)
             .glass(CircleShape, strong = strong, elevation = if (strong) 12.dp else 4.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -629,6 +654,7 @@ fun SearchPill(
     onValueChange: (String) -> Unit = {},
     onOpen: (() -> Unit)? = null,
     onSubmit: () -> Unit = {},
+    onClear: (() -> Unit)? = null,
 ) {
     val shape = RoundedCornerShape(20.dp)
     Row(
@@ -672,6 +698,15 @@ fun SearchPill(
                     },
                 )
             }
+            if (onClear != null && value.isNotEmpty()) {
+                IconButton(
+                    glyph = Glyph.Close,
+                    onClick = onClear,
+                    size = 28.dp,
+                    tint = Palette.InkTertiary,
+                    label = "Clear search",
+                )
+            }
         }
     }
 }
@@ -706,7 +741,7 @@ fun TopBar(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             if (onBack != null) {
-                IconButton(Glyph.ChevronLeft, onBack, strong = true)
+                IconButton(Glyph.ChevronLeft, onBack, strong = true, label = "Back")
             }
             Column(Modifier.weight(1f)) {
                 if (title != null) {
@@ -843,7 +878,14 @@ private fun InitialsPanel(text: String?) {
     }
 }
 
-/** A poster in the browse grid: artwork, a scrim, and the title sitting on the artwork. */
+/**
+ * A poster in the browse grid: the artwork, then its title beneath.
+ *
+ * The title used to sit over the bottom of the artwork, on top of whatever the cover prints
+ * there — which on this catalogue is usually the title itself, in a dozen scripts. Below the
+ * poster it is legible on every cover, the scrim that used to darken the art is gone, and the
+ * rails and the grid read the same way.
+ */
 @Composable
 fun PosterCard(
     title: String,
@@ -852,58 +894,54 @@ fun PosterCard(
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     badge: String? = null,
+    label: String? = title,
 ) {
     val shape = RoundedCornerShape(20.dp)
-    Box(
-        modifier = modifier
-            .aspectRatio(0.66f)
-            .pressable(onClick, onLongClick, scaleDown = 0.955f)
-            .shadow(
-                elevation = 18.dp,
-                shape = shape,
-                clip = false,
-                ambientColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.2f else 0.5f),
-                spotColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.28f else 0.7f),
-            )
-            .clip(shape),
+    Column(
+        modifier = modifier.pressable(onClick, onLongClick, scaleDown = 0.955f, label = label),
     ) {
-        Cover(coverUrl, Modifier.fillMaxSize(), shape, border = false, fallback = title)
         Box(
             Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, Color(0x05000000), Color(0xE6000000)),
-                        startY = 90f,
-                    ),
-                ),
-        )
-        if (badge != null) {
-            Box(
-                Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(8.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Color(0xB3000000))
-                    .border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(50))
-                    .padding(horizontal = 8.dp, vertical = 4.dp),
-            ) {
-                Text(
-                    text = badge,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Palette.OnArtwork,
+                .fillMaxWidth()
+                .aspectRatio(0.66f)
+                .shadow(
+                    elevation = 18.dp,
+                    shape = shape,
+                    clip = false,
+                    ambientColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.2f else 0.5f),
+                    spotColor = Palette.Shadow.copy(alpha = if (Palette.IsLight) 0.28f else 0.7f),
                 )
+                .clip(shape),
+        ) {
+            Cover(coverUrl, Modifier.fillMaxSize(), shape, border = false, fallback = title)
+            if (badge != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(8.dp)
+                        .clip(RoundedCornerShape(50))
+                        .background(Color(0xB3000000))
+                        .border(1.dp, Color(0x26FFFFFF), RoundedCornerShape(50))
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = badge,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Palette.OnArtwork,
+                    )
+                }
             }
         }
         Text(
             text = title,
             style = MaterialTheme.typography.titleSmall,
-            color = Palette.OnArtwork,
-            maxLines = 3,
+            color = Palette.Ink,
+            // Two lines are always reserved, so a one-line title does not lift the caption under
+            // it out of line with the poster next door.
+            minLines = 2,
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier
-                .align(Alignment.BottomStart)
-                .padding(10.dp),
+            modifier = Modifier.padding(top = 7.dp, start = 2.dp, end = 2.dp),
         )
     }
 }
@@ -917,6 +955,7 @@ fun ListRow(
     subtitle: String? = null,
     /** Shown instead of artwork when there is none, e.g. a chapter number. */
     badge: String? = null,
+    onLongClick: (() -> Unit)? = null,
     trailing: @Composable RowScope.() -> Unit = {},
 ) {
     GlassCard(
@@ -924,6 +963,7 @@ fun ListRow(
         shape = RoundedCornerShape(20.dp),
         elevation = 8.dp,
         onClick = onClick,
+        onLongClick = onLongClick,
         contentPadding = androidx.compose.foundation.layout.PaddingValues(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1087,7 +1127,12 @@ fun Toast(
     ) {
         Row(
             modifier = Modifier
-                .glass(RoundedCornerShape(50), strong = true, elevation = 20.dp)
+                .glass(
+                    RoundedCornerShape(50),
+                    strong = true,
+                    elevation = 20.dp,
+                    base = Palette.Canvas.copy(alpha = 0.92f),
+                )
                 .padding(start = 16.dp, end = if (actionText != null) 6.dp else 16.dp, top = 10.dp, bottom = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(9.dp),
@@ -1256,48 +1301,74 @@ fun Sheet(
     // would exit the app on a tab that has nothing to pop.
     BackHandler(enabled = visible, onBack = onDismiss)
 
-    AnimatedVisibility(visible, enter = fadeIn(), exit = fadeOut()) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Palette.Scrim)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismiss,
-                ),
-        )
-    }
-    AnimatedVisibility(
-        visible = visible,
-        modifier = modifier,
-        enter = slideInVertically(initialOffsetY = { it }),
-        exit = slideOutVertically(targetOffsetY = { it }),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .glass(
-                    RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-                    strong = true,
-                    elevation = 28.dp,
-                )
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .heightIn(max = 620.dp)
-                .padding(horizontal = 18.dp, vertical = 16.dp),
+    // Anchored by its own full-screen box rather than by the slot the screen happens to sit in:
+    // the host aligns children to the top, which used to open every sheet under the status bar.
+    // The z-order lifts it over the floating navigation bar instead of being drawn under it.
+    Box(Modifier.fillMaxSize().zIndex(if (visible) 1f else 0f)) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(),
+            exit = fadeOut(),
+            modifier = Modifier.align(Alignment.TopStart),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = Palette.Ink,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(Glyph.Close, onDismiss, size = 34.dp, tint = Palette.InkSecondary)
-            }
-            Spacer(Modifier.height(10.dp))
-            content()
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Palette.Scrim)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDismiss,
+                    ),
+            )
         }
+        AnimatedVisibility(
+            visible = visible,
+            modifier = modifier.align(Alignment.BottomCenter),
+            enter = slideInVertically(initialOffsetY = { it }),
+            exit = slideOutVertically(targetOffsetY = { it }),
+        ) {
+            SheetPanel(title = title, onDismiss = onDismiss, content = content)
+        }
+    }
+}
+
+@Composable
+private fun SheetPanel(
+    title: String,
+    onDismiss: () -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .glass(
+                RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+                strong = true,
+                elevation = 28.dp,
+                base = Palette.Canvas.copy(alpha = 0.98f),
+            )
+            .windowInsetsPadding(WindowInsets.navigationBars)
+            .heightIn(max = 620.dp)
+            .padding(horizontal = 18.dp, vertical = 16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.headlineSmall,
+                color = Palette.Ink,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(
+                Glyph.Close,
+                onDismiss,
+                size = 34.dp,
+                tint = Palette.InkSecondary,
+                label = "Close",
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        content()
     }
 }
 
@@ -1307,3 +1378,8 @@ fun formatBytes(bytes: Long): String = when {
     bytes >= 1024L -> "%.0f KB".format(bytes / 1024.0)
     else -> "$bytes B"
 }
+
+/** Free space on the volume downloads are written to, so a long queue is not a surprise. */
+fun availableStorageBytes(): Long = runCatching {
+    StatFs(Environment.getDataDirectory().absolutePath).availableBytes
+}.getOrDefault(0L)

@@ -41,7 +41,8 @@ class OrionMappingTest {
               "featuredImage": "https://storage.orion-scans.com/public/upload/series/featured/x/cover.png",
               "seriesType": "MANGA",
               "seriesStatus": "ONGOING",
-              "genres": [{"id": 2, "name": "Fantasy"}]
+              "genres": [{"id": 2, "name": "Fantasy"}],
+              "chapters": [{"slug": "chapter-1", "number": 1}]
             },
             {
               "id": 12,
@@ -49,6 +50,14 @@ class OrionMappingTest {
               "postTitle": "Some Web Novel",
               "seriesType": "NOVEL",
               "seriesStatus": "COMPLETED"
+            },
+            {
+              "id": 13,
+              "slug": "announced-but-empty",
+              "postTitle": "Announced But Empty",
+              "seriesType": "MANHWA",
+              "seriesStatus": "ONGOING",
+              "chapters": []
             }
           ],
           "totalCount": 325
@@ -125,7 +134,7 @@ class OrionMappingTest {
     }
 
     @Test
-    fun `catalogue payload keys series by slug and drops novels`() {
+    fun `catalogue payload keys series by slug and drops novels and empty series`() {
         val posts = json.decodeFromString<OrionQueryResponse>(queryPayload).posts
         val manhwa = posts.toSourceManhwa()
 
@@ -135,6 +144,15 @@ class OrionMappingTest {
         assertEquals("ONGOING", manhwa.single().status)
         // The synopsis is only on the series page.
         assertNull(manhwa.single().description)
+        assertEquals(listOf("Fantasy"), manhwa.single().genres.map { it.name })
+    }
+
+    @Test
+    fun `the series page carries the genres the catalogue omits`() {
+        val series = parseOrionSeries(seriesHtml, "how-to-walk-on-a-broken-earth")
+
+        assertEquals(listOf("Fantasy"), series.genres.map { it.name })
+        assertEquals(listOf("2"), series.genres.map { it.id })
     }
 
     @Test

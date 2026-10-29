@@ -17,8 +17,9 @@ import java.io.IOException
  * are joined into one string (`"<id>|<slug>"`, `"<mangaSlug>|<chapterSlug>"`). The encoding stays
  * inside this module; nothing outside it parses those values.
  *
- * Genre filtering is not exposed by the API, so [capabilities] says so and the UI offers no genre
- * chips for this source rather than showing a control that quietly does nothing.
+ * Genre filtering is not exposed by the API (a genre parameter is ignored), so [capabilities] says
+ * so and Browse offers no genre chips for this source. Each title still reports its own genres, so
+ * a profile can show them and recommendations can match on them.
  */
 class VortexScansSource(
     private val client: HttpClient,
@@ -32,6 +33,7 @@ class VortexScansSource(
     override val capabilities = SourceCapabilities(
         sorts = setOf(BrowseSort.LATEST),
         genres = false,
+        titleGenres = true,
         status = true,
         year = false,
         safeOnly = false,
@@ -163,9 +165,11 @@ private fun VortexScansSource.statusValue(status: StatusFilter): String? = when 
     StatusFilter.CANCELLED -> "CANCELLED"
 }
 
-private fun List<VortexPostDto>.toSourceManhwa(): List<SourceManhwa> =
+/** A title with no chapters would open to an empty profile, so it never reaches the UI. */
+internal fun List<VortexPostDto>.toSourceManhwa(): List<SourceManhwa> =
     filter { !it.isNovel && it.seriesType.equals("MANHWA", ignoreCase = true) }
         .filter { it.slug.isNotBlank() && it.id != 0 }
+        .filter { it.chapters.isNotEmpty() }
         .map { it.toSourceManhwa() }
 
 private fun VortexPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
@@ -175,6 +179,10 @@ private fun VortexPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
     coverUrl = featuredImage?.takeIf { it.isNotBlank() },
     year = null,
     status = seriesStatus,
+    genres = genres.mapNotNull { genre ->
+        val name = genre.name.trim()
+        if (name.isBlank() || genre.id == 0) null else SourceGenre(genre.id.toString(), name)
+    },
 )
 
 internal fun VortexChapterDto.toSourceChapter(mangaSlug: String): SourceChapter? {

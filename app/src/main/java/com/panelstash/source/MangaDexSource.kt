@@ -109,6 +109,7 @@ class MangaDexSource(
     override val capabilities = SourceCapabilities(
         sorts = setOf(BrowseSort.LATEST, BrowseSort.POPULAR, BrowseSort.TOP_RATED),
         genres = true,
+        titleGenres = true,
         status = true,
         year = true,
         safeOnly = true,

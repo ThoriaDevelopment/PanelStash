@@ -195,6 +195,29 @@ class DownloadStore(
         trashDir.listFiles()?.forEach { it.deleteRecursively() }
     }
 
+    /**
+     * A row that was still RUNNING when the process died has no worker behind it. It is closed
+     * out at startup so the chapter reads "failed" instead of "downloading" for ever, and its
+     * half-written directory is removed. If WorkManager still has the job, it starts again and
+     * sets the row back to RUNNING by itself.
+     */
+    suspend fun resetInterrupted() = withContext(Dispatchers.IO) {
+        for (row in dao.running()) {
+            row.localDir?.let { File(it).deleteRecursively() }
+            dao.put(
+                row.copy(
+                    state = DownloadState.FAILED,
+                    localDir = null,
+                    error = "Interrupted",
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+    }
+
+    /** Chapter ids with a download row, so their queued work can be cancelled before deletion. */
+    suspend fun chapterIdsFor(manhwaId: Long): List<Long> = dao.byManhwa(manhwaId).map { it.chapterId }
+
     suspend fun deleteAllForManhwa(manhwaId: Long) = withContext(Dispatchers.IO) {
         for (row in dao.byManhwa(manhwaId)) {
             row.localDir?.let { File(it).deleteRecursively() }

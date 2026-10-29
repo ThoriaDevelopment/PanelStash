@@ -18,8 +18,8 @@ import java.time.Instant
  * two are joined into one string (`"<seriesSlug>|<chapterSlug>"`). Nothing outside this module
  * parses those values.
  *
- * The catalogue supports three orderings and a title search but no status or genre filter, so
- * [capabilities] promises only what the API actually applies. Premium and early-access chapters
+ * The catalogue supports three orderings, a genre filter and a title search but no status filter,
+ * so [capabilities] promises only what the API actually applies. Premium and early-access chapters
  * are marked unreadable rather than failing when opened.
  */
 class AsuraScansSource(
@@ -35,7 +35,8 @@ class AsuraScansSource(
 
     override val capabilities = SourceCapabilities(
         sorts = setOf(BrowseSort.LATEST, BrowseSort.POPULAR, BrowseSort.TOP_RATED),
-        genres = false,
+        genres = true,
+        titleGenres = true,
         status = false,
         year = false,
         safeOnly = false,
@@ -56,6 +57,8 @@ class AsuraScansSource(
             parameter("page", pageOf(offset, limit))
             parameter("limit", limit)
             parameter("sort", sortValue(sort))
+            // The slug, not the name: a capitalised genre is answered with an empty list.
+            if (!tagId.isNullOrBlank()) parameter("genre", tagId)
         }
         return decode(AsuraSeriesResponse.serializer(), body).data.toSourceManhwa()
     }
@@ -70,8 +73,11 @@ class AsuraScansSource(
         return decode(AsuraSeriesResponse.serializer(), body).data.toSourceManhwa()
     }
 
-    /** Listed on the site, but the catalogue API cannot filter by one. */
-    override suspend fun genres(): List<SourceGenre> = emptyList()
+    override suspend fun genres(): List<SourceGenre> =
+        decode(AsuraGenresResponse.serializer(), request("/api/genres")).data
+            .filter { it.name.isNotBlank() && it.slug.isNotBlank() }
+            .map { SourceGenre(id = it.slug, name = it.name.trim()) }
+            .sortedBy { it.name }
 
     override suspend fun manhwa(remoteId: String): SourceManhwa {
         val body = request("/api/series/$remoteId")
@@ -157,10 +163,15 @@ private fun sortValue(sort: BrowseSort): String = when (sort) {
     BrowseSort.TOP_RATED -> "rating"
 }
 
-/** Prose has no pages, so it never reaches the UI; the site labels it separately. */
+/**
+ * Prose has no pages, so it never reaches the UI; the site labels it separately. A title the
+ * catalogue reports with no chapters is dropped for the same reason: it would open to an empty
+ * profile.
+ */
 internal fun List<AsuraSeriesDto>.toSourceManhwa(): List<SourceManhwa> =
     filter { it.type.orEmpty().lowercase() !in NOVEL_TYPES }
         .filter { it.slug.isNotBlank() && it.title.isNotBlank() }
+        .filter { it.chapterCount > 0 }
         .map { it.toSourceManhwa() }
 
 private val NOVEL_TYPES = setOf("novel", "web_novel", "webnovel")
@@ -172,6 +183,11 @@ internal fun AsuraSeriesDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
     coverUrl = cover?.takeIf { it.isNotBlank() },
     year = releaseYear,
     status = status,
+    genres = genres.mapNotNull { genre ->
+        val id = genre.slug.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        genre.name.takeIf { it.isNotBlank() }?.let { SourceGenre(id = id, name = it.trim()) }
+    },
+    chapterCount = chapterCount.takeIf { it > 0 },
 )
 
 internal fun AsuraChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {

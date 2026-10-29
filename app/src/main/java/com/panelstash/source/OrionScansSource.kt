@@ -18,9 +18,10 @@ import java.io.IOException
  * parses those values.
  *
  * The catalogue API can search and filter by status, but ignores genre parameters, so
- * [capabilities] reports no genre filtering and the UI shows no chips rather than a control that
- * quietly does nothing. Ordering cannot be verified either: the API accepts `orderBy` and returns
- * a list that barely changes, so only newest-first is offered.
+ * [capabilities] reports no genre *filtering* and Browse shows no chips rather than a control that
+ * quietly does nothing. Each title still reports its genres, so a profile can show them. Ordering
+ * cannot be verified either: the API accepts `orderBy` and returns a list that barely changes, so
+ * only newest-first is offered.
  */
 class OrionScansSource(
     private val client: HttpClient,
@@ -36,6 +37,7 @@ class OrionScansSource(
     override val capabilities = SourceCapabilities(
         sorts = setOf(BrowseSort.LATEST),
         genres = false,
+        titleGenres = true,
         status = true,
         year = false,
         safeOnly = false,
@@ -88,6 +90,7 @@ class OrionScansSource(
             coverUrl = series.coverUrl,
             year = series.year,
             status = series.status,
+            genres = series.genres,
         )
     }
 
@@ -182,10 +185,14 @@ private fun OrionScansSource.statusValue(status: StatusFilter): String? = when (
     StatusFilter.CANCELLED -> "CANCELLED"
 }
 
-/** Prose novels share the catalogue but have no pages, so they never reach the UI. */
+/**
+ * Prose novels share the catalogue but have no pages, so they never reach the UI. Neither does a
+ * series the catalogue reports with no chapters: it would open to an empty profile.
+ */
 internal fun List<OrionPostDto>.toSourceManhwa(): List<SourceManhwa> =
     filter { !it.seriesType.equals("NOVEL", ignoreCase = true) }
         .filter { it.slug.isNotBlank() }
+        .filter { it.chapters.isNotEmpty() }
         .map { it.toSourceManhwa() }
 
 internal fun OrionPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
@@ -196,4 +203,8 @@ internal fun OrionPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
     coverUrl = featuredImage?.takeIf { it.isNotBlank() },
     year = null,
     status = seriesStatus,
+    genres = genres.mapNotNull { genre ->
+        val name = genre.name.trim()
+        if (name.isBlank() || genre.id == 0) null else SourceGenre(genre.id.toString(), name)
+    },
 )

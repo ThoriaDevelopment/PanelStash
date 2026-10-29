@@ -14,6 +14,9 @@ sealed interface ReaderPage {
     val width: Int
     val height: Int
 
+    /** Identity of the bytes, used to remember a shape a page turned out to have. */
+    val key: String
+
     /** Width over height, or null when the source did not say. */
     fun aspectOrNull(): Float? =
         if (width > 0 && height > 0) width.toFloat() / height.toFloat() else null
@@ -22,13 +25,17 @@ sealed interface ReaderPage {
         val file: File,
         override val width: Int = 0,
         override val height: Int = 0,
-    ) : ReaderPage
+    ) : ReaderPage {
+        override val key: String get() = file.path
+    }
 
     data class Remote(
         val url: String,
         override val width: Int = 0,
         override val height: Int = 0,
-    ) : ReaderPage
+    ) : ReaderPage {
+        override val key: String get() = url
+    }
 }
 
 /**

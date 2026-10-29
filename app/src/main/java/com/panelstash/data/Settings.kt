@@ -105,6 +105,10 @@ data class Preferences(
     /** Chapter lists read newest-first when true. */
     val reverseChapters: Boolean = false,
     val browseFilter: BrowseFilter = BrowseFilter.None,
+    /** Newest first. Kept as a list because the order is the point. */
+    val recentSearches: List<String> = emptyList(),
+    /** Sources the reader switched off, by id. */
+    val disabledSourceIds: Set<String> = emptySet(),
 )
 
 /**
@@ -150,6 +154,11 @@ class Settings(context: Context) {
         defaultSourceId = prefs.getString(KEY_DEFAULT_SOURCE, "mangadex") ?: "mangadex",
         reverseChapters = prefs.getBoolean(KEY_REVERSE_CHAPTERS, false),
         browseFilter = readFilter(),
+        recentSearches = prefs.getString(KEY_RECENT_SEARCHES, null)
+            ?.split(SEARCH_SEPARATOR)
+            ?.filter { it.isNotBlank() }
+            .orEmpty(),
+        disabledSourceIds = prefs.getStringSet(KEY_DISABLED_SOURCES, emptySet()).orEmpty(),
     )
 
     private fun quality(key: String, fallback: PageQuality): PageQuality =
@@ -184,6 +193,8 @@ class Settings(context: Context) {
             putInt(KEY_FILTER_YEAR, value.browseFilter.year ?: 0)
             putBoolean(KEY_FILTER_SAFE, value.browseFilter.safeOnly)
             putStringSet(KEY_FILTER_EXCLUDED, value.browseFilter.excludedTagIds)
+            putString(KEY_RECENT_SEARCHES, value.recentSearches.joinToString(SEARCH_SEPARATOR))
+            putStringSet(KEY_DISABLED_SOURCES, value.disabledSourceIds)
         }
     }
 
@@ -204,5 +215,10 @@ class Settings(context: Context) {
         const val KEY_FILTER_YEAR = "filter_year"
         const val KEY_FILTER_SAFE = "filter_safe"
         const val KEY_FILTER_EXCLUDED = "filter_excluded"
+        const val KEY_RECENT_SEARCHES = "recent_searches"
+        const val KEY_DISABLED_SOURCES = "disabled_sources"
+
+        /** Unit separator: a search can contain any delimiter a user can type. */
+        const val SEARCH_SEPARATOR = "\u001F"
     }
 }

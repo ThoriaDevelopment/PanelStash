@@ -59,6 +59,46 @@ class MangaDexMappingTest {
     }
 
     @Test
+    fun `tags become genres, with real genres ahead of themes`() {
+        // Captured shape: MangaDex sends the theme first and the genre second.
+        val payload = """
+            {"result":"ok","data":[{
+              "id":"romance-id","type":"manga",
+              "attributes":{
+                "title":{"en":"A Romance"},
+                "tags":[
+                  {"id":"theme-id","type":"tag","attributes":{"name":{"en":"Full Colour"},"group":"theme"}},
+                  {"id":"genre-id","type":"tag","attributes":{"name":{"en":"Romance"},"group":"genre"}}
+                ]
+              }
+            }]}
+        """.trimIndent()
+
+        val manhwa = json.decodeFromString<MangaListResponse>(payload).data.single().toSourceManhwa()
+
+        // "More like this" uses the first entry, so a format tag must not outrank the genre.
+        assertEquals(listOf("Romance", "Full Colour"), manhwa.genres.map { it.name })
+        assertEquals("genre-id", manhwa.genres.first().id)
+    }
+
+    @Test
+    fun `tags without an english name or an id are dropped`() {
+        val payload = """
+            {"result":"ok","data":[{
+              "id":"m","type":"manga",
+              "attributes":{"title":{"en":"Untitled"},"tags":[
+                {"id":"","type":"tag","attributes":{"name":{"en":"Nameless"},"group":"genre"}},
+                {"id":"ko-id","type":"tag","attributes":{"name":{"ko":"\uB85C\uB9E8\uC2A4"},"group":"genre"}}
+              ]}
+            }]}
+        """.trimIndent()
+
+        val manhwa = json.decodeFromString<MangaListResponse>(payload).data.single().toSourceManhwa()
+
+        assertEquals(listOf("로맨스"), manhwa.genres.map { it.name })
+    }
+
+    @Test
     fun `external chapters keep their link and are listed as bookmarks`() {
         val dto = json.decodeFromString<ChapterListResponse>(externalChapterPayload).data.single()
         val chapter = dto.toSourceChapter()!!

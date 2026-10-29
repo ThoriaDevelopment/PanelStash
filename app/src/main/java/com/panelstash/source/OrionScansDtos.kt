@@ -27,6 +27,14 @@ data class OrionPostDto(
     val seriesType: String? = null,
     val seriesStatus: String? = null,
     val genres: List<OrionGenreDto> = emptyList(),
+    /** The newest few only. An empty list means the series has nothing to open. */
+    val chapters: List<OrionChapterRef> = emptyList(),
+)
+
+@Serializable
+data class OrionChapterRef(
+    val slug: String = "",
+    val number: Double? = null,
 )
 
 @Serializable

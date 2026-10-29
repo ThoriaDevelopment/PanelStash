@@ -57,6 +57,8 @@ object Network {
         host.endsWith("nyxscans.com") -> "https://nyxscans.com/"
         host.endsWith("orion-scans.com") -> "https://orion-scans.com/"
         host.endsWith("kaynscans.com") -> "https://kaynscans.com/"
+        // Also covers cdn.flamecomics.xyz, which serves the pages.
+        host.endsWith("flamecomics.xyz") -> "https://flamecomics.xyz/"
         else -> null
     }
 }

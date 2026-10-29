@@ -17,9 +17,10 @@ import java.io.IOException
  * the series slug, so both are joined into one string (`"<id>|<slug>"`, `"<seriesSlug>|<chapterSlug>"`).
  * Nothing outside this module parses those values.
  *
- * Genres exist and are listed by the API, but every plausible query parameter that would filter by
- * one is ignored, so [capabilities] reports no genre filtering and the UI shows no chips rather
- * than a control that quietly does nothing.
+ * Genres exist, are listed by the API and are published on each title, but every plausible query
+ * parameter that would filter by one is ignored, so [capabilities] reports no genre *filtering*:
+ * the profile shows a title's genres while Browse shows no chips rather than a control that
+ * quietly does nothing.
  */
 class NyxScansSource(
     private val client: HttpClient,
@@ -35,6 +36,7 @@ class NyxScansSource(
     override val capabilities = SourceCapabilities(
         sorts = setOf(BrowseSort.LATEST, BrowseSort.POPULAR),
         genres = false,
+        titleGenres = true,
         status = true,
         year = false,
         safeOnly = false,
@@ -171,11 +173,13 @@ private fun NyxScansSource.statusValue(status: StatusFilter): String? = when (st
 
 /**
  * The catalogue mixes prose novels in with the comics; they have no pages, so they are dropped
- * here rather than appearing as a title that cannot be opened.
+ * here rather than appearing as a title that cannot be opened. A title the catalogue reports with
+ * no chapters is dropped for the same reason: it would open to an empty profile.
  */
 internal fun List<NyxPostDto>.toSourceManhwa(): List<SourceManhwa> =
     filter { !it.isNovel && it.seriesType.orEmpty().uppercase() in COMIC_TYPES }
         .filter { it.slug.isNotBlank() && it.id != 0 }
+        .filter { it.chapters.isNotEmpty() }
         .map { it.toSourceManhwa() }
 
 private val COMIC_TYPES = setOf("MANHWA", "MANHUA", "MANGA")
@@ -187,6 +191,10 @@ internal fun NyxPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
     coverUrl = featuredImage?.takeIf { it.isNotBlank() },
     year = null,
     status = seriesStatus,
+    genres = genres.mapNotNull { genre ->
+        val name = genre.name.trim()
+        if (name.isBlank() || genre.id == 0) null else SourceGenre(genre.id.toString(), name)
+    },
 )
 
 internal fun NyxChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {

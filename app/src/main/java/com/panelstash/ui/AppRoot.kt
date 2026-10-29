@@ -3,7 +3,14 @@ package com.panelstash.ui
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
@@ -23,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -34,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -71,6 +80,19 @@ private val tabs = listOf(
 /** How long a deleted download can still be taken back. */
 private const val UNDO_WINDOW_MS = 5_000L
 
+/**
+ * One saved-state key per screen, so a list keeps its scroll position when a profile is opened
+ * over it or a tab is switched. Two profiles are two entries, so their lists never share state.
+ */
+private fun screenKey(screen: Screen): String = when (screen) {
+    is Screen.Browse -> "browse"
+    is Screen.Library -> "library"
+    is Screen.Search -> "search"
+    is Screen.Settings -> "settings"
+    is Screen.Profile -> "profile-${screen.manhwaId}"
+    is Screen.Reader -> "reader-${screen.chapterId}"
+}
+
 @Composable
 fun AppRoot(vm: AppViewModel = viewModel()) {
     val preferences by vm.preferences.collectAsState()
@@ -95,9 +117,34 @@ private fun AppContent(vm: AppViewModel) {
     }
 
     val screen by vm.screen.collectAsState()
+    val context = LocalContext.current
+    val savedState = rememberSaveableStateHolder()
     val message by vm.message.collectAsState()
     val undo by vm.pendingUndo.collectAsState()
     val canGoBack by vm.canGoBack.collectAsState()
+    val wantsNotifications by vm.notificationPrompt.collectAsState()
+
+    // Asked the first time a download starts, where the request explains itself, rather than on
+    // launch where the only notification the app posts is a silent progress bar.
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { vm.clearNotificationPrompt() }
+    LaunchedEffect(wantsNotifications) {
+        if (!wantsNotifications) return@LaunchedEffect
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            vm.clearNotificationPrompt()
+            return@LaunchedEffect
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            vm.clearNotificationPrompt()
+        } else {
+            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
 
     BackHandler(enabled = canGoBack) { vm.back() }
 
@@ -119,13 +166,16 @@ private fun AppContent(vm: AppViewModel) {
     val onTab = screen is Screen.Browse || screen is Screen.Library
 
     AppCanvas {
-        when (val current = screen) {
-            is Screen.Browse -> BrowseScreen(vm)
-            is Screen.Library -> LibraryScreen(vm)
-            is Screen.Search -> SearchScreen(vm)
-            is Screen.Profile -> ProfileScreen(vm, current.manhwaId)
-            is Screen.Reader -> ReaderScreen(vm)
-            is Screen.Settings -> SettingsScreen(vm)
+        val current = screen
+        savedState.SaveableStateProvider(screenKey(current)) {
+            when (current) {
+                is Screen.Browse -> BrowseScreen(vm)
+                is Screen.Library -> LibraryScreen(vm)
+                is Screen.Search -> SearchScreen(vm)
+                is Screen.Profile -> ProfileScreen(vm, current.manhwaId)
+                is Screen.Reader -> ReaderScreen(vm)
+                is Screen.Settings -> SettingsScreen(vm)
+            }
         }
 
         if (message != null && undo == null && !onReader) {
@@ -133,6 +183,8 @@ private fun AppContent(vm: AppViewModel) {
                 text = message!!,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
+                    // Below the status bar, or the toast covers the clock and the camera cutout.
+                    .windowInsetsPadding(WindowInsets.statusBars)
                     .padding(top = 12.dp),
             )
         }
@@ -148,7 +200,14 @@ private fun AppContent(vm: AppViewModel) {
         ) {
             Row(
                 modifier = Modifier
-                    .glass(RoundedCornerShape(50), strong = true, elevation = 22.dp)
+                    // The undo bar floats over a chapter list, and a clear fill is the only
+                    // thing that keeps its label from reading as part of the row behind it.
+                    .glass(
+                        RoundedCornerShape(50),
+                        strong = true,
+                        elevation = 22.dp,
+                        base = Palette.Canvas.copy(alpha = 0.92f),
+                    )
                     .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -202,7 +261,9 @@ private fun FloatingNavBar(
 
     Box(
         modifier = modifier
-            .glass(shape, strong = true, elevation = 26.dp)
+            // Opaque enough to read over artwork: the labels used to sit on top of whatever
+            // poster happened to be scrolling underneath them.
+            .glass(shape, strong = true, elevation = 26.dp, base = Palette.Canvas.copy(alpha = 0.88f))
             .padding(6.dp),
     ) {
         Box(

@@ -17,7 +17,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -30,6 +33,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +53,7 @@ import com.panelstash.data.db.DownloadEntity
 import com.panelstash.data.db.DownloadState
 import com.panelstash.ui.AppViewModel
 import com.panelstash.ui.ChapterLoad
+import com.panelstash.ui.Chip
 import com.panelstash.ui.Cover
 import com.panelstash.ui.EmptyState
 import com.panelstash.ui.Eyebrow
@@ -58,16 +63,43 @@ import com.panelstash.ui.GlyphIcon
 import com.panelstash.ui.IconButton
 import com.panelstash.ui.PillButton
 import com.panelstash.ui.PillTone
+import com.panelstash.ui.PosterCard
 import com.panelstash.ui.ProgressBar
 import com.panelstash.ui.SectionTitle
 import com.panelstash.ui.SearchPill
+import com.panelstash.ui.SegmentedControl
 import com.panelstash.ui.Sheet
 import com.panelstash.ui.Shimmer
+import com.panelstash.ui.SimilarState
 import com.panelstash.ui.TopBar
+import com.panelstash.ui.availableStorageBytes
 import com.panelstash.ui.formatBytes
 import com.panelstash.ui.isMetered
 import com.panelstash.ui.pressable
 import com.panelstash.ui.theme.Palette
+
+/** Above this many chapters, a download asks before filling the queue and the disk. */
+private const val BATCH_CONFIRM_ABOVE = 5
+
+/** How much of a synopsis is shown before "Read more". */
+private const val DESCRIPTION_PREVIEW_CHARS = 240
+
+/** A synopsis cut to a preview, and whether there is more of it to show. */
+private data class SynopsisPreview(val text: String, val truncated: Boolean)
+
+private fun synopsisPreview(description: String): SynopsisPreview {
+    if (description.length <= DESCRIPTION_PREVIEW_CHARS) {
+        return SynopsisPreview(description, false)
+    }
+    val flat = description.replace(Regex("\\s+"), " ").trim()
+    if (flat.length <= DESCRIPTION_PREVIEW_CHARS) {
+        return SynopsisPreview(description, false)
+    }
+    val cut = flat.lastIndexOf(' ', DESCRIPTION_PREVIEW_CHARS)
+        .let { if (it > DESCRIPTION_PREVIEW_CHARS / 2) it else DESCRIPTION_PREVIEW_CHARS }
+    val head = flat.take(cut).trimEnd().trimEnd(',', ';', ':', '-', '—')
+    return SynopsisPreview("$head…", true)
+}
 
 @Composable
 fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
@@ -77,8 +109,15 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     val preferences by vm.preferences.collectAsState()
     val followed by remember(manhwaId) { vm.followedState(manhwaId) }.collectAsState(initial = false)
     val later by remember(manhwaId) { vm.readLaterState(manhwaId) }.collectAsState(initial = false)
+    val similarState by vm.similar.collectAsState()
+    val genresByManhwa by vm.profileGenres.collectAsState()
+    val listState = rememberLazyListState()
+    var descriptionOpen by remember(manhwaId) { mutableStateOf(false) }
+    // Saved, so coming back from a similar title lands on the tab it was opened from.
+    var section by rememberSaveable(manhwaId) { mutableStateOf(ProfileSection.CHAPTERS) }
     val context = LocalContext.current
     var pendingDownload by remember { mutableStateOf<List<ChapterEntity>?>(null) }
+    var pendingBatch by remember { mutableStateOf<List<ChapterEntity>?>(null) }
     var showJump by remember { mutableStateOf(false) }
     var jumpQuery by remember { mutableStateOf("") }
 
@@ -93,12 +132,20 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         }
     }
 
-    LaunchedEffect(manhwaId) { vm.ensureChapters(manhwaId) }
+    LaunchedEffect(manhwaId) {
+        vm.ensureChapters(manhwaId)
+        vm.loadGenresFor(manhwaId)
+    }
+
+    // Recommendations cost a request, so they are only fetched once the tab is actually opened.
+    LaunchedEffect(manhwaId, section) {
+        if (section == ProfileSection.SIMILAR) vm.loadSimilar(manhwaId)
+    }
 
     val current = state
     val chapterLoad = if (load?.manhwaId == manhwaId) load else null
 
-    fun startDownload(chapters: List<ChapterEntity>) {
+    fun queueDownload(chapters: List<ChapterEntity>) {
         if (chapters.isEmpty() || current == null) return
         // The queue's own policy decides whether a phone connection is enough. When it is not,
         // this asks once, for this request only.
@@ -109,11 +156,49 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         }
     }
 
+    /** A long queue is confirmed once, with the space it has to fit in, before anything starts. */
+    fun startDownload(chapters: List<ChapterEntity>) {
+        if (chapters.isEmpty() || current == null) return
+        if (chapters.size > BATCH_CONFIRM_ABOVE) {
+            pendingBatch = chapters
+        } else {
+            queueDownload(chapters)
+        }
+    }
+
+    pendingBatch?.let { batch ->
+        AlertDialog(
+            onDismissRequest = { pendingBatch = null },
+            title = { Text("Download ${batch.size} chapters?") },
+            text = {
+                Text(
+                    "They download one after another in the background. " +
+                        "${formatBytes(availableStorageBytes())} is free on this device.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingBatch = null
+                    queueDownload(batch)
+                }) { Text("Download") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingBatch = null }) { Text("Cancel") }
+            },
+        )
+    }
+
     pendingDownload?.let { pending ->
         AlertDialog(
             onDismissRequest = { pendingDownload = null },
             title = { Text("Use mobile data?") },
-            text = { Text("${pending.size} chapter(s) will download now.") },
+            text = {
+                Text(
+                    "${pending.size} " +
+                        (if (pending.size == 1) "chapter" else "chapters") +
+                        " will download now.",
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     pendingDownload = null
@@ -126,9 +211,13 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         )
     }
 
+    // The title moves into the bar only once the hero has scrolled away, so it is never on
+    // screen twice and the bar still says where the reader is.
+    val heroScrolled = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0
+
     Column(Modifier.fillMaxSize()) {
         TopBar(
-            title = current?.manhwa?.title,
+            title = if (heroScrolled) current?.manhwa?.title else null,
             onBack = { vm.back() },
             scrim = false,
         )
@@ -143,6 +232,11 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         }
 
         val manhwa = current.manhwa
+        // Cut at a word boundary rather than with maxLines: a maxLines cut put the synopsis's
+        // paragraph break on a line of its own, which came out as a row of dots above the link
+        // and pushed the link past the card's bottom edge.
+        val description = manhwa.description?.trim().orEmpty()
+        val preview = remember(description) { synopsisPreview(description) }
         // External chapters are bookmarks to a publisher, so they must not make 100% progress
         // unreachable for a title that also has readable chapters here.
         val readable = current.chapters.filter { it.externalUrl == null }
@@ -157,19 +251,22 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         }
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(bottom = 116.dp),
         ) {
             item(key = "hero") {
+                // The hero is as tall as the cover and the text beside it. It used to be a fixed
+                // 230dp, which left a dead band between the progress bar and the action row on
+                // every title whose blurb was short enough to fit.
                 Box {
                     val backdrop = manhwa.coverUrl
                     if (backdrop != null) {
-                        Backdrop(backdrop)
+                        Backdrop(backdrop, Modifier.matchParentSize())
                     }
                     Box(
                         Modifier
-                            .fillMaxWidth()
-                            .height(230.dp)
+                            .matchParentSize()
                             .background(
                                 Brush.verticalGradient(Palette.heroScrim()),
                             ),
@@ -198,7 +295,8 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             )
                             val meta = listOfNotNull(
                                 manhwa.year?.toString(),
-                                manhwa.status?.replaceFirstChar { it.uppercase() },
+                                // Sources spell it "Ongoing", "ONGOING" or "ongoing".
+                                manhwa.status?.lowercase()?.replaceFirstChar { it.uppercase() },
                                 vm.sourceName(manhwa.sourceId),
                             ).joinToString(" · ")
                             if (meta.isNotEmpty()) {
@@ -279,88 +377,171 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                 }
             }
 
-            item(key = "chapters-title") {
-                Row(
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    SectionTitle(
-                        text = if (ordered.isEmpty()) "Chapters" else {
-                            "Chapters · ${ordered.size}"
-                        },
-                        modifier = Modifier.weight(1f),
-                    )
-                    PillButton(
-                        text = if (preferences.reverseChapters) "Newest first" else "Oldest first",
-                        tone = PillTone.Quiet,
-                        onClick = {
-                            vm.updatePreferences { it.copy(reverseChapters = !it.reverseChapters) }
-                        },
-                    )
-                    IconButton(
-                        glyph = Glyph.Refresh,
-                        onClick = { vm.refreshChapters(manhwaId) },
-                        size = 34.dp,
-                        tint = Palette.InkSecondary,
-                    )
+            if (current.downloads.isNotEmpty()) {
+                item(key = "delete-downloads") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(bottom = 4.dp),
+                    ) {
+                        PillButton(
+                            text = "Delete ${current.downloads.size} downloaded " +
+                                (if (current.downloads.size == 1) "chapter" else "chapters"),
+                            glyph = Glyph.Trash,
+                            tone = PillTone.Quiet,
+                            onClick = { vm.deleteAllDownloads(manhwaId) },
+                        )
+                    }
                 }
             }
 
-            when {
-                ordered.isEmpty() && chapterLoad?.loading == true -> items(5) {
-                    Shimmer(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 5.dp)
-                            .height(66.dp),
-                    )
+            val genres = genresByManhwa[manhwaId].orEmpty()
+            if (genres.isNotEmpty()) {
+                item(key = "genres") {
+                    LazyRow(
+                        contentPadding = PaddingValues(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    ) {
+                        items(genres, key = { it.id }) { genre ->
+                            Chip(
+                                text = genre.name,
+                                selected = false,
+                                onClick = { vm.openGenre(manhwa.sourceId, genre) },
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (description.isNotEmpty()) {
+                item(key = "description") {
+                    GlassCard(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        shape = RoundedCornerShape(20.dp),
+                        contentPadding = PaddingValues(14.dp),
+                    ) {
+                        Text(
+                            text = if (descriptionOpen) description else preview.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Palette.InkSecondary,
+                        )
+                        if (preview.truncated) {
+                            Text(
+                                text = if (descriptionOpen) "Show less" else "Read more",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Palette.Accent,
+                                modifier = Modifier
+                                    .padding(top = 8.dp)
+                                    .pressable({ descriptionOpen = !descriptionOpen }),
+                            )
+                        }
+                    }
+                }
+            }
+
+            item(key = "sections") {
+                SegmentedControl(
+                    options = listOf("Chapters", "Similar"),
+                    selectedIndex = section.ordinal,
+                    onSelect = { section = ProfileSection.entries[it] },
+                    modifier = Modifier
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 6.dp),
+                )
+            }
+
+            if (section == ProfileSection.CHAPTERS) {
+                item(key = "chapters-title") {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        SectionTitle(
+                            text = if (ordered.isEmpty()) "Chapters" else {
+                                "Chapters · ${ordered.size}"
+                            },
+                            modifier = Modifier.weight(1f),
+                        )
+                        PillButton(
+                            text = if (preferences.reverseChapters) "Newest first" else "Oldest first",
+                            tone = PillTone.Quiet,
+                            onClick = {
+                                vm.updatePreferences { it.copy(reverseChapters = !it.reverseChapters) }
+                            },
+                        )
+                        IconButton(
+                            glyph = Glyph.Refresh,
+                            onClick = { vm.refreshChapters(manhwaId) },
+                            size = 34.dp,
+                            tint = Palette.InkSecondary,
+                            label = "Refresh chapters",
+                        )
+                    }
                 }
 
-                ordered.isEmpty() && chapterLoad?.error != null -> item(key = "chapters-error") {
-                    EmptyState(
-                        glyph = Glyph.Refresh,
-                        title = "Chapters did not load",
-                        message = chapterLoad?.error,
-                        actionText = "Try again",
-                        onAction = { vm.refreshChapters(manhwaId) },
-                    )
-                }
+                when {
+                    ordered.isEmpty() && chapterLoad?.loading == true -> items(5) {
+                        Shimmer(
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 5.dp)
+                                .height(66.dp),
+                        )
+                    }
 
-                ordered.isEmpty() && chapterLoad?.matching == true -> item(key = "chapters-matching") {
-                    EmptyState(
-                        glyph = Glyph.Compass,
-                        title = "Looking on your other sources",
-                        message = "${vm.sourceName(manhwa.sourceId)} has no English chapters for " +
-                            "this one, which usually means it was licensed away. The same title " +
-                            "is being looked for on the sources you have installed.",
-                    )
-                }
+                    ordered.isEmpty() && chapterLoad?.error != null -> item(key = "chapters-error") {
+                        EmptyState(
+                            glyph = Glyph.Refresh,
+                            title = "Chapters did not load",
+                            message = chapterLoad?.error,
+                            actionText = "Try again",
+                            onAction = { vm.refreshChapters(manhwaId) },
+                        )
+                    }
 
-                ordered.isEmpty() -> item(key = "chapters-empty") {
-                    EmptyState(
-                        glyph = Glyph.Compass,
-                        title = "No readable chapters here",
-                        message = "${vm.sourceName(manhwa.sourceId)} has no English chapters for " +
-                            "this one — often because it was licensed elsewhere — and no other " +
-                            "installed source has it either. Delete it and search for another " +
-                            "title.",
-                    )
-                }
+                    ordered.isEmpty() && chapterLoad?.matching == true -> item(key = "chapters-matching") {
+                        EmptyState(
+                            glyph = Glyph.Compass,
+                            title = "Looking on your other sources",
+                            message = "${vm.sourceName(manhwa.sourceId)} has no English chapters for " +
+                                "this one, which usually means it was licensed away elsewhere. " +
+                                "Checking your other sources for the same title.",
+                        )
+                    }
 
-                else -> items(ordered, key = { it.id }) { chapter ->
-                    ChapterCard(
-                        chapter = chapter,
-                        isResumePoint = chapter.id == current.resumeChapterId,
-                        download = current.downloads[chapter.id],
-                        onOpen = {
-                            val page = if (chapter.id == current.resumeChapterId) current.resumePage else 0
-                            openChapter(chapter, page)
-                        },
-                        onToggleRead = { vm.setChapterRead(chapter.id, chapter.readAt == null) },
-                        onDownload = { startDownload(listOf(chapter)) },
-                        onDelete = { vm.deleteDownload(chapter.id, chapter.numberText) },
-                    )
+                    ordered.isEmpty() -> item(key = "chapters-empty") {
+                        EmptyState(
+                            glyph = Glyph.Compass,
+                            title = "No readable chapters here",
+                            message = "${vm.sourceName(manhwa.sourceId)} has no English chapters for " +
+                                "this one, which usually means it was licensed elsewhere. None of " +
+                                "your other sources has it either. Try searching for another copy.",
+                        )
+                    }
+
+                    else -> items(ordered, key = { it.id }) { chapter ->
+                        ChapterCard(
+                            chapter = chapter,
+                            isResumePoint = chapter.id == current.resumeChapterId,
+                            download = current.downloads[chapter.id],
+                            onOpen = {
+                                val page = if (chapter.id == current.resumeChapterId) current.resumePage else 0
+                                openChapter(chapter, page)
+                            },
+                            onToggleRead = { vm.setChapterRead(chapter.id, chapter.readAt == null) },
+                            onDownload = { startDownload(listOf(chapter)) },
+                            onDelete = { vm.deleteDownload(chapter.id, chapter.numberText) },
+                        )
+                    }
                 }
+            } else {
+                similarItems(
+                    similar = similarState,
+                    onOpen = { vm.openProfile(it) },
+                    onRefresh = { vm.loadSimilar(manhwaId, force = true) },
+                )
             }
         }
     }
@@ -373,108 +554,117 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         val chapterList = current?.chapters.orEmpty()
         val firstUnread = chapterList.firstOrNull { it.readAt == null && it.externalUrl == null }
         val readableChapters = chapterList.filter { it.externalUrl == null }
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                PillButton(
-                    text = "First",
-                    tone = PillTone.Quiet,
-                    onClick = {
-                        readableChapters.firstOrNull()?.let { openChapter(it) }
-                        showJump = false
-                    },
-                )
-                PillButton(
-                    text = "Latest",
-                    tone = PillTone.Quiet,
-                    onClick = {
-                        readableChapters.lastOrNull()?.let { openChapter(it) }
-                        showJump = false
-                    },
-                )
-                PillButton(
-                    text = "Next unread",
-                    tone = PillTone.Quiet,
-                    enabled = firstUnread != null,
-                    onClick = {
-                        firstUnread?.let { openChapter(it) }
-                        showJump = false
-                    },
-                )
-            }
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                SearchPill(
-                    value = jumpQuery,
-                    modifier = Modifier.weight(1f),
-                    onValueChange = { jumpQuery = it },
-                    onSubmit = {
-                        val wanted = jumpQuery.trim().trimStart('0').ifEmpty { "0" }
-                        val target = chapterList.firstOrNull { it.numberText == wanted }
-                            ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
-                        if (target != null) {
-                            openChapter(target)
+        // One scroller for the actions, the search field and the chapters. The list used to sit
+        // in a fixed 240dp window inside a fixed-height sheet, which left everything past the
+        // fold unreachable exactly when a series is long enough to need the jump sheet.
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            item(key = "actions") {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                ) {
+                    PillButton(
+                        text = "First",
+                        tone = PillTone.Quiet,
+                        onClick = {
+                            readableChapters.firstOrNull()?.let { openChapter(it) }
                             showJump = false
-                        } else {
-                            vm.showMessage("No chapter $jumpQuery")
-                        }
-                    },
-                )
-                PillButton(
-                    text = "Go",
-                    tone = PillTone.Accent,
-                    onClick = {
-                        val wanted = jumpQuery.trim().trimStart('0').ifEmpty { "0" }
-                        val target = chapterList.firstOrNull { it.numberText == wanted }
-                            ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
-                        if (target != null) {
-                            openChapter(target)
+                        },
+                    )
+                    PillButton(
+                        text = "Latest",
+                        tone = PillTone.Quiet,
+                        onClick = {
+                            readableChapters.lastOrNull()?.let { openChapter(it) }
                             showJump = false
-                        } else {
-                            vm.showMessage("No chapter $jumpQuery")
-                        }
-                    },
-                )
+                        },
+                    )
+                    PillButton(
+                        text = "Next unread",
+                        tone = PillTone.Quiet,
+                        enabled = firstUnread != null,
+                        onClick = {
+                            firstUnread?.let { openChapter(it) }
+                            showJump = false
+                        },
+                    )
+                }
             }
-            LazyColumn(
-                modifier = Modifier.fillMaxWidth().height(240.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                items(
-                    items = if (preferences.reverseChapters) chapterList.asReversed() else chapterList,
-                    // Keyed by chapter, not by position: reversing the order or syncing new
-                    // chapters must move a row, never restyle the one that was already there.
-                    key = { it.id },
-                ) { chapter ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(14.dp))
-                            .pressable({
-                                openChapter(chapter)
+            item(key = "search") {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 4.dp),
+                ) {
+                    SearchPill(
+                        value = jumpQuery,
+                        modifier = Modifier.weight(1f),
+                        onValueChange = { jumpQuery = it },
+                        onSubmit = {
+                            val wanted = jumpQuery.trim().trimStart('0').ifEmpty { "0" }
+                            val target = chapterList.firstOrNull { it.numberText == wanted }
+                                ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
+                            if (target != null) {
+                                openChapter(target)
                                 showJump = false
-                            })
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "Chapter ${chapter.numberText}",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Palette.Ink,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Eyebrow(
-                            if (chapter.id == current?.resumeChapterId) {
-                                "READING"
-                            } else if (chapter.readAt != null) {
-                                "READ"
                             } else {
-                                ""
-                            },
-                            color = Palette.Accent,
-                        )
-                    }
+                                vm.showMessage("No chapter $jumpQuery")
+                            }
+                        },
+                    )
+                    PillButton(
+                        text = "Go",
+                        tone = PillTone.Accent,
+                        onClick = {
+                            val wanted = jumpQuery.trim().trimStart('0').ifEmpty { "0" }
+                            val target = chapterList.firstOrNull { it.numberText == wanted }
+                                ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
+                            if (target != null) {
+                                openChapter(target)
+                                showJump = false
+                            } else {
+                                vm.showMessage("No chapter $jumpQuery")
+                            }
+                        },
+                    )
+                }
+            }
+            items(
+                items = if (preferences.reverseChapters) chapterList.asReversed() else chapterList,
+                // Keyed by chapter, not by position: reversing the order or syncing new
+                // chapters must move a row, never restyle the one that was already there.
+                key = { it.id },
+            ) { chapter ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .pressable({
+                            openChapter(chapter)
+                            showJump = false
+                        })
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Chapter ${chapter.numberText}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = Palette.Ink,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Eyebrow(
+                        if (chapter.id == current?.resumeChapterId) {
+                            "READING"
+                        } else if (chapter.readAt != null) {
+                            "READ"
+                        } else {
+                            ""
+                        },
+                        color = Palette.Accent,
+                    )
                 }
             }
         }
@@ -486,9 +676,9 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
  * otherwise leave a grey rectangle stretched behind the whole hero.
  */
 @Composable
-private fun Backdrop(url: String) {
+private fun Backdrop(url: String, modifier: Modifier = Modifier) {
     var loaded by remember(url) { mutableStateOf(false) }
-    Box(Modifier.fillMaxWidth().height(230.dp)) {
+    Box(modifier) {
         AsyncImage(
             model = url,
             contentDescription = null,
@@ -596,6 +786,7 @@ private fun ChapterCard(
                     onClick = onDownload,
                     size = 34.dp,
                     tint = Palette.InkSecondary,
+                    label = "Download chapter ${chapter.numberText}",
                 )
 
                 download.state == DownloadState.COMPLETE -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -605,6 +796,7 @@ private fun ChapterCard(
                         onClick = onDelete,
                         size = 34.dp,
                         tint = Palette.InkSecondary,
+                        label = "Delete chapter ${chapter.numberText}",
                     )
                 }
 
@@ -615,6 +807,77 @@ private fun ChapterCard(
                 )
 
                 else -> Eyebrow("SAVING", color = Palette.Accent)
+            }
+        }
+    }
+}
+
+/** Which list a profile shows under its title: the chapters, or what to read next. */
+private enum class ProfileSection { CHAPTERS, SIMILAR }
+
+/**
+ * The "Similar" tab. It is grouped the way the source itself groups titles, so the heading says
+ * so rather than implying a taste engine the app does not have.
+ */
+private fun LazyListScope.similarItems(
+    similar: SimilarState,
+    onOpen: (Long) -> Unit,
+    onRefresh: () -> Unit,
+) {
+    item(key = "similar-title") {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                SectionTitle("If you like this", Modifier.weight(1f))
+                PillButton("Refresh", onRefresh, tone = PillTone.Quiet)
+            }
+            Eyebrow(
+                "Grouped by genre, or by what else is new here.",
+                Modifier.padding(bottom = 6.dp),
+                color = Palette.InkSecondary,
+            )
+        }
+    }
+    when {
+        similar.loading -> items(2, key = { "similar-loading-$it" }) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                repeat(3) { Shimmer(Modifier.weight(1f).height(160.dp)) }
+            }
+        }
+
+        similar.cards.isEmpty() -> item(key = "similar-empty") {
+            EmptyState(
+                glyph = Glyph.Compass,
+                title = "Nothing similar to show",
+                message = "This title has not been grouped with anything else here yet. Its " +
+                    "source's catalogue is the next best place to look.",
+            )
+        }
+
+        else -> items(
+            items = similar.cards.chunked(3),
+            key = { chunk -> "similar-${chunk.first().manhwa.id}" },
+        ) { chunk ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                for (card in chunk) {
+                    Column(Modifier.weight(1f)) {
+                        PosterCard(
+                            title = card.manhwa.title,
+                            coverUrl = card.manhwa.coverUrl,
+                            onClick = { onOpen(card.manhwa.id) },
+                        )
+                        if (card.caption != null) {
+                            Eyebrow(card.caption, Modifier.padding(top = 6.dp, start = 2.dp))
+                        }
+                    }
+                }
+                // A short last row keeps the same column width as the rows above it.
+                repeat(3 - chunk.size) { Spacer(Modifier.weight(1f)) }
             }
         }
     }

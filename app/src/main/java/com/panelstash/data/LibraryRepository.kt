@@ -3,6 +3,7 @@ package com.panelstash.data
 import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.ContinueRow
 import com.panelstash.data.db.FollowEntity
+import com.panelstash.data.db.FollowRow
 import com.panelstash.data.db.ManhwaEntity
 import com.panelstash.data.db.PanelStashDatabase
 import com.panelstash.data.db.ReadLaterEntity
@@ -26,6 +27,16 @@ data class BrowsePage(
     val exhausted: Boolean,
 )
 
+/** The same shape for search, so "more results" advances every source instead of replaying one. */
+data class SearchPage(
+    val items: List<ManhwaEntity>,
+    val nextOffsets: Map<String, Int>,
+    val exhausted: Boolean,
+)
+
+/** Catalogue rows the reader never touched are dropped after this long. */
+private const val CATALOGUE_TTL_MS = 30L * 24 * 60 * 60 * 1000
+
 class LibraryRepository(
     private val sources: SourceRegistry,
     private val db: PanelStashDatabase,
@@ -42,46 +53,70 @@ class LibraryRepository(
 
     fun observeContinueReading(): Flow<List<ContinueRow>> = manhwaDao.observeContinueReading()
 
-    fun observeFollowed(): Flow<List<ManhwaEntity>> = followDao.observeAll()
+    fun observeFollowed(): Flow<List<FollowRow>> = followDao.observeAll()
 
     fun observeReadLater(): Flow<List<ManhwaEntity>> = laterDao.observeAll()
 
     fun observeFollowedState(manhwaId: Long): Flow<Boolean> = followDao.observe(manhwaId).map { it != null }
     fun observeReadLaterState(manhwaId: Long): Flow<Boolean> = laterDao.observe(manhwaId).map { it != null }
 
-    suspend fun search(sourceId: String, query: String): List<ManhwaEntity> {
+    /**
+     * A page of one source's search, or its ranking for a blank query. "Popular now" must be
+     * popular where a source can rank, so the sort falls back to latest only where it cannot.
+     */
+    suspend fun search(sourceId: String, query: String, offset: Int, limit: Int): SearchPage {
         val source = sources.get(sourceId)
-        val results = if (query.isBlank()) {
-            source.browse(BrowseSort.LATEST, tagId = null, filter = BrowseFilter.None, offset = 0, limit = 30)
+        val rows = if (query.isBlank()) {
+            source.browse(discoverySort(source), tagId = null, filter = BrowseFilter.None, offset, limit)
         } else {
-            source.search(query = query, offset = 0, limit = 30)
+            source.search(query = query, offset = offset, limit = limit)
         }
-        return results.mapNotNull { upsert(it, source.id) }
+        return SearchPage(
+            items = rows.mapNotNull { upsert(it, source.id) },
+            nextOffsets = mapOf(source.id to offset + rows.size),
+            exhausted = rows.size < limit,
+        )
     }
 
     /**
      * Search every installed source at once. A source that fails is skipped rather than failing
-     * the whole search: one dead site should not hide results from the other four.
+     * the whole search: one dead site should not hide results from the others.
+     *
+     * Results are interleaved by rank, so "All sources" is one merged list rather than thirty
+     * rows from whichever site happens to come first in the registry.
      */
-    suspend fun searchAll(query: String): List<ManhwaEntity> = coroutineScope {
+    suspend fun searchAll(query: String, offsets: Map<String, Int>, limit: Int): SearchPage = coroutineScope {
         val pages = sources.all.map { source ->
+            val offset = offsets[source.id] ?: 0
             async {
-                source to runCatching {
+                val result = runCatching {
                     if (query.isBlank()) {
-                        source.browse(BrowseSort.LATEST, null, BrowseFilter.None, 0, 30)
+                        source.browse(discoverySort(source), null, BrowseFilter.None, offset, limit)
                     } else {
-                        source.search(query, 0, 30)
+                        source.search(query, offset, limit)
                     }
                 }
+                Triple(source, offset, result)
             }
         }.awaitAll()
 
-        val firstError = pages.firstNotNullOfOrNull { it.second.exceptionOrNull() }
-        val found = pages.flatMap { (source, result) ->
-            result.getOrDefault(emptyList()).mapNotNull { upsert(it, source.id) }
-        }
-        if (found.isEmpty()) firstError?.let { throw it }
-        found
+        val firstError = pages.firstNotNullOfOrNull { it.third.exceptionOrNull() }
+        val nextOffsets = offsets.toMutableMap()
+        val perSource = ranked(pages, nextOffsets)
+        val items = interleaveRanked(perSource, perSource.sumOf { it.second.size }).map { it.second }
+        if (items.isEmpty()) firstError?.let { throw it }
+        SearchPage(
+            items = items,
+            nextOffsets = nextOffsets,
+            exhausted = pages.all { it.third.getOrDefault(emptyList()).size < limit },
+        )
+    }
+
+    /** Popular where a source ranks its catalogue, latest where it cannot. */
+    private fun discoverySort(source: Source): BrowseSort = when {
+        BrowseSort.POPULAR in source.capabilities.sorts -> BrowseSort.POPULAR
+        BrowseSort.TOP_RATED in source.capabilities.sorts -> BrowseSort.TOP_RATED
+        else -> BrowseSort.LATEST
     }
 
     /**
@@ -107,13 +142,26 @@ class LibraryRepository(
         val exhausted = pages.all { (_, _, result) ->
             result.isSuccess && result.getOrDefault(emptyList()).size < limit
         }
-        val items = pages.flatMap { (source, offset, result) ->
-            val rows = result.getOrDefault(emptyList())
-            if (result.isSuccess) nextOffsets[source.id] = offset + rows.size
-            rows.mapNotNull { upsert(it, source.id) }
-        }
+        // Interleaved by rank: with every source selected, a page must not be one site's list.
+        val perSource = ranked(pages, nextOffsets)
+        val items = interleaveRanked(perSource, perSource.sumOf { it.second.size }).map { it.second }
         if (items.isEmpty()) firstError?.let { throw it }
         BrowsePage(items = items, nextOffsets = nextOffsets, exhausted = exhausted)
+    }
+
+    /**
+     * Stores an aggregate page's rows and keeps the chapter count each source reported, so the
+     * merge can prefer the complete copy of a title two sites both publish.
+     */
+    private suspend fun ranked(
+        pages: List<Triple<Source, Int, Result<List<SourceManhwa>>>>,
+        nextOffsets: MutableMap<String, Int>,
+    ): List<Pair<String, List<RankedManhwa>>> = pages.map { (source, offset, result) ->
+        val rows = result.getOrDefault(emptyList())
+        if (result.isSuccess) nextOffsets[source.id] = offset + rows.size
+        source.id to rows.mapNotNull { fresh ->
+            upsert(fresh, source.id)?.let { RankedManhwa(it, fresh.chapterCount) }
+        }
     }
 
     /** A page of the browse catalogue, stored locally so it can be opened straight away. */
@@ -131,9 +179,14 @@ class LibraryRepository(
 
     suspend fun genres(sourceId: String): List<SourceGenre> = sources.get(sourceId).genres()
 
+    suspend fun manhwa(manhwaId: Long): ManhwaEntity? = manhwaDao.byId(manhwaId)
+
     fun source(sourceId: String): Source? = sources.getOrNull(sourceId)
 
     fun installedSources(): List<Source> = sources.all
+
+    /** Every source the app knows, including ones switched off in settings. */
+    fun allSources(): List<Source> = sources.everything
 
     suspend fun manhwaByRemote(sourceId: String, remoteId: String): ManhwaEntity? =
         manhwaDao.byRemote(sourceId, remoteId)
@@ -153,8 +206,10 @@ class LibraryRepository(
         for (source in sources.all) {
             if (source.id in excluding) continue
             val candidates = runCatching { source.search(title, 0, 20) }.getOrNull().orEmpty()
+            // Only the same title counts. A source's search happily returns a spin-off for its
+            // parent, so a partial match would open "Solo Leveling: Arise" in place of "Solo
+            // Leveling" — a different series with a different reader.
             val match = candidates.firstOrNull { normaliseTitle(it.title) == wanted }
-                ?: candidates.firstOrNull { normaliseTitle(it.title).contains(wanted) }
             if (match != null) return source to match
         }
         return null
@@ -167,14 +222,14 @@ class LibraryRepository(
         chapterDao.update(chapter.copy(pageCount = pageCount))
     }
 
-    suspend fun previousChapter(manhwaId: Long, chapterId: Long): ChapterEntity? {
-        val all = chapterDao.listForManhwa(manhwaId).filter { it.externalUrl == null }
-        val index = all.indexOfFirst { it.id == chapterId }
-        return if (index > 0) all[index - 1] else null
-    }
-
-    private fun normaliseTitle(value: String): String =
-        value.lowercase().filter { it.isLetterOrDigit() }
+    /**
+     * A title as a comparison key: letters and digits only, with a bracketed annotation dropped,
+     * so "Solo Leveling (Official)" and "Solo Leveling" are the same title.
+     */
+    private fun normaliseTitle(value: String): String = value
+        .replace(Regex("\\([^)]*\\)|\\[[^]]*]|【[^】]*】"), " ")
+        .lowercase()
+        .filter { it.isLetterOrDigit() }
 
     /** Loads a manhwa from its source and refreshes its chapter list. Returns the local id. */
     suspend fun openManhwa(sourceId: String, remoteId: String): Long {
@@ -266,6 +321,17 @@ class LibraryRepository(
     suspend fun chapter(chapterId: Long): ChapterEntity? = chapterDao.byId(chapterId)
 
     suspend fun chaptersFor(manhwaId: Long): List<ChapterEntity> = chapterDao.listForManhwa(manhwaId)
+
+    /** Seeds for Browse recommendations: what the reader touched most recently, whatever it was. */
+    suspend fun recentlyTouched(limit: Int): List<ManhwaEntity> =
+        manhwaDao.recentlyTouched(limit).map { it.manhwa }
+
+    /** Titles already read, followed or saved, so a recommendation never comes back around. */
+    suspend fun consumedTitles(): List<String> = manhwaDao.consumedTitles()
+
+    /** Removes catalogue rows the reader never read, followed, saved or downloaded. */
+    suspend fun pruneCatalogue(olderThanMs: Long = CATALOGUE_TTL_MS): Int =
+        manhwaDao.pruneUnused(System.currentTimeMillis() - olderThanMs)
 
     suspend fun firstChapter(manhwaId: Long): ChapterEntity? = chapterDao.firstChapter(manhwaId)
 

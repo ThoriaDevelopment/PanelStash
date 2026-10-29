@@ -25,6 +25,7 @@ internal data class OrionSeries(
     val coverUrl: String?,
     val status: String?,
     val year: Int?,
+    val genres: List<SourceGenre> = emptyList(),
     val chapters: List<SourceChapter>,
 )
 
@@ -43,9 +44,20 @@ internal fun parseOrionSeries(html: String, seriesSlug: String): OrionSeries {
         coverUrl = meta.stringOrNull("featuredImage"),
         status = meta.stringOrNull("seriesStatus"),
         year = meta.stringOrNull("releaseDate")?.let(::yearOf),
+        genres = meta.genresOf(),
         chapters = panel.chaptersOf(seriesSlug),
     )
 }
+
+/** The genres the series page files a title under, as chip-shaped names. */
+private fun JsonObject?.genresOf(): List<SourceGenre> =
+    this?.arrayOrNull("genres").orEmpty().mapNotNull { entry ->
+        val genre = entry as? JsonObject ?: return@mapNotNull null
+        val name = genre.stringOrNull("name")?.trim() ?: return@mapNotNull null
+        if (name.isBlank()) return@mapNotNull null
+        val id = genre.stringOrNull("id") ?: name
+        SourceGenre(id = id, name = name)
+    }
 
 private fun JsonObject?.chaptersOf(seriesSlug: String): List<SourceChapter> =
     this?.arrayOrNull("initialChap").orEmpty().mapNotNull { entry ->

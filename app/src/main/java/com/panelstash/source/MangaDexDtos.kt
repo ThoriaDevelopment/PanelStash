@@ -31,6 +31,8 @@ data class MangaAttributes(
     val year: Int? = null,
     val status: String? = null,
     @SerialName("contentRating") val contentRating: String? = null,
+    /** Embedded in every manga object; no `includes[]` is needed to receive them. */
+    val tags: List<TagDto> = emptyList(),
 )
 
 @Serializable

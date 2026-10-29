@@ -30,7 +30,15 @@ data class VortexPostDto(
     val seriesStatus: String? = null,
     val isNovel: Boolean = false,
     val alternativeTitles: String? = null,
+    /** The genres the title was filed under; empty on the titles the site never categorised. */
+    val genres: List<VortexGenreDto> = emptyList(),
     val chapters: List<VortexChapterDto> = emptyList(),
+)
+
+@Serializable
+data class VortexGenreDto(
+    val id: Int = 0,
+    val name: String = "",
 )
 
 @Serializable

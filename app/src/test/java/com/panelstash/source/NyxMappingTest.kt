@@ -23,6 +23,7 @@ class NyxMappingTest {
               "seriesType": "MANHWA",
               "seriesStatus": "ONGOING",
               "isNovel": false,
+              "genres": [{"id": 3, "name": " School Life", "color": ""}, {"id": 4, "name": "romance", "color": ""}],
               "chapters": [
                 {"id": 51941, "number": 1, "title": "", "slug": "chapter-1", "isLocked": false, "isAccessible": true}
               ]
@@ -35,6 +36,14 @@ class NyxMappingTest {
               "seriesStatus": "COMPLETED",
               "isNovel": true,
               "chapters": []
+            },
+            {
+              "id": 867,
+              "slug": "announced-but-empty",
+              "postTitle": "Announced But Empty",
+              "seriesType": "MANHWA",
+              "seriesStatus": "ONGOING",
+              "chapters": []
             }
           ],
           "totalCount": 790
@@ -42,11 +51,21 @@ class NyxMappingTest {
     """.trimIndent()
 
     @Test
-    fun `novels are dropped from the catalogue`() {
+    fun `novels and titles with no chapters are dropped from the catalogue`() {
         val posts = json.decodeFromString<NyxQueryResponse>(queryPayload).posts
         val manhwa = posts.toSourceManhwa()
         assertEquals(1, manhwa.size)
         assertEquals("First Love Trap", manhwa.single().title)
+    }
+
+    @Test
+    fun `genres arrive with the title and are trimmed`() {
+        val dto = json.decodeFromString<NyxQueryResponse>(queryPayload).posts.first()
+
+        assertEquals(
+            listOf("3" to "School Life", "4" to "romance"),
+            dto.toSourceManhwa().genres.map { it.id to it.name },
+        )
     }
 
     @Test

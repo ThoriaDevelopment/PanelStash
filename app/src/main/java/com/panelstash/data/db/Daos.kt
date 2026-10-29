@@ -1,6 +1,7 @@
 package com.panelstash.data.db
 
 import androidx.room.Dao
+import androidx.room.Embedded
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
@@ -22,6 +23,21 @@ data class ResumePoint(
     val chapterId: Long,
     val pageIndex: Int,
     val updatedAt: Long,
+)
+
+/** A title plus when the reader last touched it, in any way. Drives the Browse recommendations. */
+data class TouchedRow(
+    @Embedded val manhwa: ManhwaEntity,
+    val touchedAt: Long,
+)
+
+/** A followed title plus the counts that make the list worth reading at a glance. */
+data class FollowRow(
+    @Embedded val manhwa: ManhwaEntity,
+    val unread: Int,
+    val total: Int,
+    val latestChapter: String?,
+    val addedAt: Long,
 )
 
 data class DownloadRow(
@@ -66,6 +82,59 @@ interface ManhwaDao {
         """,
     )
     fun observeContinueReading(): Flow<List<ContinueRow>>
+
+    /**
+     * The most recently touched titles: resumed, finished, followed or saved, whichever is newer.
+     * Recommendations are seeded from these, so reading counts even if a title is never followed.
+     */
+    @Query(
+        """
+        SELECT m.*, MAX(t.at) AS touchedAt
+        FROM manhwa m
+        JOIN (
+            SELECT manhwaId, updatedAt AS at FROM resume
+            UNION ALL
+            SELECT manhwaId, readAt AS at FROM chapter WHERE readAt IS NOT NULL
+            UNION ALL
+            SELECT manhwaId, addedAt AS at FROM follow
+            UNION ALL
+            SELECT manhwaId, addedAt AS at FROM read_later
+        ) t ON t.manhwaId = m.id
+        GROUP BY m.id
+        ORDER BY touchedAt DESC
+        LIMIT :limit
+        """,
+    )
+    suspend fun recentlyTouched(limit: Int): List<TouchedRow>
+
+    /** Titles the reader already has a relationship with; never recommended back to them. */
+    @Query(
+        """
+        SELECT title FROM manhwa m
+        WHERE EXISTS (SELECT 1 FROM resume r WHERE r.manhwaId = m.id)
+           OR EXISTS (SELECT 1 FROM chapter c WHERE c.manhwaId = m.id AND c.readAt IS NOT NULL)
+           OR EXISTS (SELECT 1 FROM follow f WHERE f.manhwaId = m.id)
+           OR EXISTS (SELECT 1 FROM read_later l WHERE l.manhwaId = m.id)
+        """,
+    )
+    suspend fun consumedTitles(): List<String>
+
+    /**
+     * Drops catalogue rows the reader never touched. Browse, search and the rails store every
+     * title they see, so without this the table grows for as long as the app is installed.
+     */
+    @Query(
+        """
+        DELETE FROM manhwa
+        WHERE lastFetchedAt < :before
+          AND NOT EXISTS (SELECT 1 FROM resume r WHERE r.manhwaId = manhwa.id)
+          AND NOT EXISTS (SELECT 1 FROM chapter c WHERE c.manhwaId = manhwa.id AND c.readAt IS NOT NULL)
+          AND NOT EXISTS (SELECT 1 FROM follow f WHERE f.manhwaId = manhwa.id)
+          AND NOT EXISTS (SELECT 1 FROM read_later l WHERE l.manhwaId = manhwa.id)
+          AND NOT EXISTS (SELECT 1 FROM download d WHERE d.manhwaId = manhwa.id)
+        """,
+    )
+    suspend fun pruneUnused(before: Long): Int
 }
 
 @Dao
@@ -100,9 +169,6 @@ interface ChapterDao {
 
     @Query("UPDATE chapter SET readAt = :readAt WHERE id = :chapterId")
     suspend fun setReadAt(chapterId: Long, readAt: Long?)
-
-    @Query("SELECT COUNT(*) FROM chapter WHERE manhwaId = :manhwaId AND readAt IS NOT NULL")
-    fun observeReadCount(manhwaId: Long): Flow<Int>
 
     @Query(
         "SELECT * FROM chapter WHERE manhwaId = :manhwaId AND externalUrl IS NULL " +
@@ -140,8 +206,25 @@ interface FollowDao {
     @Query("SELECT * FROM follow WHERE manhwaId = :manhwaId LIMIT 1")
     fun observe(manhwaId: Long): Flow<FollowEntity?>
 
-    @Query("SELECT m.* FROM manhwa m JOIN follow f ON f.manhwaId = m.id ORDER BY f.addedAt DESC")
-    fun observeAll(): Flow<List<ManhwaEntity>>
+    /**
+     * Followed titles with how much is left to read and the newest chapter, so the tab is a
+     * tracker rather than an alphabetical list nobody needs to open.
+     */
+    @Query(
+        """
+        SELECT m.*, f.addedAt AS addedAt,
+               (SELECT COUNT(*) FROM chapter c
+                  WHERE c.manhwaId = m.id AND c.readAt IS NULL AND c.externalUrl IS NULL) AS unread,
+               (SELECT COUNT(*) FROM chapter c
+                  WHERE c.manhwaId = m.id AND c.externalUrl IS NULL) AS total,
+               (SELECT c.numberText FROM chapter c WHERE c.manhwaId = m.id
+                  ORDER BY CASE WHEN c.sortKey IS NULL THEN 1 ELSE 0 END,
+                           c.sortKey DESC, c.numberText DESC LIMIT 1) AS latestChapter
+        FROM manhwa m JOIN follow f ON f.manhwaId = m.id
+        ORDER BY f.addedAt DESC
+        """,
+    )
+    fun observeAll(): Flow<List<FollowRow>>
 }
 
 @Dao
@@ -178,6 +261,9 @@ interface DownloadDao {
 
     @Query("SELECT * FROM download WHERE manhwaId = :manhwaId")
     suspend fun byManhwa(manhwaId: Long): List<DownloadEntity>
+
+    @Query("SELECT * FROM download WHERE state = 'RUNNING'")
+    suspend fun running(): List<DownloadEntity>
 
     @Query("DELETE FROM download WHERE manhwaId = :manhwaId")
     suspend fun deleteForManhwa(manhwaId: Long)

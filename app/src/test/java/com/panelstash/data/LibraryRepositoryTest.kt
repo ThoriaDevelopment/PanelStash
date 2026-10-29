@@ -25,6 +25,7 @@ import io.mockk.mockk
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -80,7 +81,8 @@ class LibraryRepositoryTest {
 
         val first = repository.browseAll(BrowseSort.LATEST, null, BrowseFilter.None, emptyMap(), limit = 2)
 
-        assertEquals(listOf("a1", "a2", "b1"), first.items.map { it.title })
+        // Rank-interleaved: b's first row lands between a's first and second.
+        assertEquals(listOf("a1", "b1", "a2"), first.items.map { it.title })
         assertEquals(mapOf("a" to 2, "b" to 1), first.nextOffsets)
         // b is done, but a still has a second page to read.
         assertFalse(first.exhausted)
@@ -132,9 +134,9 @@ class LibraryRepositoryTest {
         val first = FakeSource(id = "first", searchHits = listOf(manhwa("hit-one")))
         val second = FakeSource(id = "second", searchFailure = SourceError.Transient())
 
-        val results = repository(first, second).searchAll("mount hua")
+        val results = repository(first, second).searchAll("mount hua", emptyMap(), limit = 30)
 
-        assertEquals(listOf("hit-one"), results.map { it.title })
+        assertEquals(listOf("hit-one"), results.items.map { it.title })
         assertEquals(listOf("mount hua"), first.searchQueries)
         assertEquals(listOf("mount hua"), second.searchQueries)
     }
@@ -143,11 +145,45 @@ class LibraryRepositoryTest {
     fun `searchAll with an empty query browses the latest list instead`() = runBlocking {
         val source = FakeSource(id = "only", browsePages = mapOf(0 to listOf(manhwa("latest"))))
 
-        val results = repository(source).searchAll("")
+        val results = repository(source).searchAll("", emptyMap(), limit = 30)
 
-        assertEquals(listOf("latest"), results.map { it.title })
+        assertEquals(listOf("latest"), results.items.map { it.title })
         assertEquals(listOf(0), source.browseOffsets)
         assertTrue(source.searchQueries.isEmpty())
+    }
+
+    @Test
+    fun `an empty query asks for the ranking when the source has one`() = runBlocking {
+        val ranked = FakeSource(
+            id = "ranked",
+            browsePages = mapOf(0 to listOf(manhwa("top"))),
+            sorts = setOf(BrowseSort.POPULAR),
+        )
+
+        val page = repository(ranked).searchAll("", emptyMap(), limit = 30)
+
+        assertEquals(listOf("top"), page.items.map { it.title })
+        assertEquals(listOf(BrowseSort.POPULAR), ranked.browseSorts)
+    }
+
+    @Test
+    fun `another source's spin-off is not accepted as the same title`() = runBlocking {
+        val vortex = FakeSource(
+            id = "vortex",
+            searchHits = listOf(manhwa("Solo Leveling: Arise"), manhwa("Solo Leveling (Official)")),
+        )
+
+        val match = repository(vortex).findOnOtherSource("Solo Leveling", excluding = setOf("md"))
+
+        // "Solo Leveling: Arise" is a different series; the bracketed re-release is this one.
+        assertEquals("Solo Leveling (Official)", match?.second?.title)
+    }
+
+    @Test
+    fun `a title no other source names exactly is left unmatched`() = runBlocking {
+        val vortex = FakeSource(id = "vortex", searchHits = listOf(manhwa("Solo Leveling: Arise")))
+
+        assertNull(repository(vortex).findOnOtherSource("Solo Leveling", excluding = setOf("md")))
     }
 
     private fun manhwa(remoteId: String) = SourceManhwa(
@@ -165,13 +201,15 @@ class LibraryRepositoryTest {
         private val searchHits: List<SourceManhwa> = emptyList(),
         private val browseFailure: Throwable? = null,
         private val searchFailure: Throwable? = null,
+        private val sorts: Set<BrowseSort> = setOf(BrowseSort.LATEST),
     ) : Source {
 
         override val name = id
 
-        override val capabilities = SourceCapabilities()
+        override val capabilities = SourceCapabilities(sorts = sorts)
 
         val browseOffsets = mutableListOf<Int>()
+        val browseSorts = mutableListOf<BrowseSort>()
         val searchQueries = mutableListOf<String>()
 
         override suspend fun browse(
@@ -182,6 +220,7 @@ class LibraryRepositoryTest {
             limit: Int,
         ): List<SourceManhwa> {
             browseOffsets += offset
+            browseSorts += sort
             browseFailure?.let { throw it }
             return browsePages[offset].orEmpty()
         }

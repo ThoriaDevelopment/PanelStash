@@ -1,5 +1,7 @@
 package com.panelstash.ui
 
+import com.panelstash.data.DiscoveryCard
+import com.panelstash.data.DiscoveryRail
 import com.panelstash.data.ReaderPage
 import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.DownloadEntity
@@ -53,6 +55,20 @@ data class BrowseState(
         get() = BrowseSort.entries.filter { it in capabilities.sorts }.ifEmpty { listOf(BrowseSort.LATEST) }
 }
 
+/** What the Browse screen shows above the grid: a leaderboard and personalised rows. */
+data class DiscoveryState(
+    val loading: Boolean = false,
+    val rails: List<DiscoveryRail> = emptyList(),
+)
+
+/** The "similar" row on an opened manhwa. [attempted] keeps an empty result from re-querying. */
+data class SimilarState(
+    val manhwaId: Long? = null,
+    val loading: Boolean = false,
+    val attempted: Boolean = false,
+    val cards: List<DiscoveryCard> = emptyList(),
+)
+
 /** Per-manhwa chapter sync status, so the profile can explain an empty chapter list. */
 data class ChapterLoad(
     val manhwaId: Long,
@@ -75,6 +91,8 @@ data class SearchState(
     val sourceId: String = ALL_SOURCES,
     val results: List<ManhwaEntity> = emptyList(),
     val loading: Boolean = false,
+    val loadingMore: Boolean = false,
+    val endReached: Boolean = false,
     val message: String? = null,
 )
 
@@ -84,7 +102,6 @@ data class ReaderState(
     val pages: List<ReaderPage>,
     val startPage: Int,
     val nextChapterId: Long?,
-    val previousChapterId: Long?,
 )
 
 data class DownloadGroup(

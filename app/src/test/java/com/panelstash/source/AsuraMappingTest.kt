@@ -22,13 +22,22 @@ class AsuraMappingTest {
               "status": "ongoing",
               "type": "manhwa",
               "release_year": 2026,
-              "chapter_count": 6
+              "chapter_count": 6,
+              "genres": [{"id": 1, "name": "Action", "slug": "action"}]
             },
             {
               "id": 12,
               "slug": "a-web-novel",
               "title": "A Web Novel",
-              "type": "web_novel"
+              "type": "web_novel",
+              "chapter_count": 3
+            },
+            {
+              "id": 13,
+              "slug": "announced-but-empty",
+              "title": "Announced But Empty",
+              "type": "manhwa",
+              "chapter_count": 0
             }
           ],
           "meta": {"total": 2, "page": 1, "limit": 30, "total_pages": 1}
@@ -70,6 +79,9 @@ class AsuraMappingTest {
         assertEquals("https://cdn.asurascans.com/asura-images/covers/blade-of-the-discarded.590181.webp", manhwa.coverUrl)
         assertEquals(2026, manhwa.year)
         assertEquals("ongoing", manhwa.status)
+        // The slug is what the catalogue filter takes, so that is the id the chips carry.
+        assertEquals(listOf("action" to "Action"), manhwa.genres.map { it.id to it.name })
+        assertEquals(6, manhwa.chapterCount)
     }
 
     @Test

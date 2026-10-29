@@ -31,21 +31,53 @@ object DownloadNotifications {
     }
 
     fun notifyProgress(context: Context, title: String, chapter: String, fraction: Float) {
-        post(context, "$title · $chapter", progress = (fraction * 100).toInt(), showProgress = true)
+        post(
+            context = context,
+            heading = "Downloading",
+            text = "$title · Chapter $chapter",
+            progress = (fraction * 100).toInt(),
+            showProgress = true,
+        )
     }
 
     fun notifyDone(context: Context, title: String, chapter: String) {
-        post(context, "$title · $chapter", progress = 0, showProgress = false)
+        post(
+            context = context,
+            heading = "Download complete",
+            text = "$title · Chapter $chapter",
+            progress = 0,
+            showProgress = false,
+            autoCancel = true,
+        )
     }
 
-    private fun post(context: Context, text: String, progress: Int, showProgress: Boolean) {
+    fun notifyFailed(context: Context, title: String, chapter: String) {
+        post(
+            context = context,
+            heading = "Download failed",
+            text = "$title · Chapter $chapter",
+            progress = 0,
+            showProgress = false,
+            autoCancel = true,
+        )
+    }
+
+    private fun post(
+        context: Context,
+        heading: String,
+        text: String,
+        progress: Int,
+        showProgress: Boolean,
+        autoCancel: Boolean = false,
+    ) {
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_download)
-            .setContentTitle("Downloading")
+            .setContentTitle(heading)
             .setContentText(text)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setSilent(true)
             .setOngoing(showProgress)
+            .setAutoCancel(autoCancel)
             .setProgress(100, progress, false)
             .build()
         // Notification permission can be denied; downloads still run, only the progress

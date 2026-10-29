@@ -2,6 +2,7 @@ package com.panelstash.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -64,7 +66,9 @@ fun SettingsScreen(vm: AppViewModel) {
     val preferences by vm.preferences.collectAsState()
     var cacheBytes by remember { mutableStateOf<Long?>(null) }
     var showSources by remember { mutableStateOf(false) }
-    val sources = remember { vm.installedSources() }
+    // Every known source: switched-off ones stay listed so they can be switched back on.
+    val sources = remember { vm.allSources() }
+    val enabledSources = sources.filter { it.id !in preferences.disabledSourceIds }
 
     suspend fun measureCache() {
         cacheBytes = withContext(Dispatchers.IO) { vm.imageCacheBytes() }
@@ -90,13 +94,19 @@ fun SettingsScreen(vm: AppViewModel) {
             item(key = "accent") {
                 Column {
                     Eyebrow("ACCENT", Modifier.padding(horizontal = 4.dp, vertical = 4.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        AccentTheme.entries.forEach { accent ->
-                            Chip(
-                                text = accent.label,
-                                selected = preferences.accent == accent,
-                                onClick = { vm.updatePreferences { it.copy(accent = accent) } },
-                            )
+                    // Every accent is on screen: in one row the last one was cut off by the
+                    // right edge, which made it look like it did not exist.
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AccentTheme.entries.chunked(3).forEach { row ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                row.forEach { accent ->
+                                    Chip(
+                                        text = accent.label,
+                                        selected = preferences.accent == accent,
+                                        onClick = { vm.updatePreferences { it.copy(accent = accent) } },
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -105,7 +115,7 @@ fun SettingsScreen(vm: AppViewModel) {
             item(key = "theme") {
                 ChoiceRow(
                     title = "Theme",
-                    subtitle = "Light keeps the same glass and pure surfaces, on a light canvas.",
+                    subtitle = "Same design, on a light background.",
                     options = ThemeMode.entries.map { it.label },
                     selectedIndex = ThemeMode.entries.indexOf(preferences.themeMode).coerceAtLeast(0),
                     onSelect = { index ->
@@ -275,7 +285,8 @@ fun SettingsScreen(vm: AppViewModel) {
             }
 
             item(key = "default-source") {
-                val default = sources.firstOrNull { it.id == preferences.defaultSourceId } ?: sources.firstOrNull()
+                val default = enabledSources.firstOrNull { it.id == preferences.defaultSourceId }
+                    ?: enabledSources.firstOrNull()
                 SettingRow(
                     title = "Default source",
                     subtitle = default?.let { "${it.name} · ${it.description}" } ?: "No sources installed",
@@ -289,17 +300,25 @@ fun SettingsScreen(vm: AppViewModel) {
             item(key = "source-notes") {
                 Column {
                     sources.forEach { source ->
+                        val on = source.id !in preferences.disabledSourceIds
                         GlassCard(
                             modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
                             shape = RoundedCornerShape(18.dp),
                             elevation = 4.dp,
                             contentPadding = PaddingValues(14.dp),
                         ) {
-                            Text(
-                                text = source.name,
-                                style = MaterialTheme.typography.titleSmall,
-                                color = Palette.Ink,
-                            )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = source.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = if (on) Palette.Ink else Palette.InkSecondary,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Toggle(
+                                    checked = on,
+                                    onCheckedChange = { vm.setSourceEnabled(source.id, it) },
+                                )
+                            }
                             Text(
                                 text = source.description,
                                 style = MaterialTheme.typography.bodySmall,
@@ -314,6 +333,13 @@ fun SettingsScreen(vm: AppViewModel) {
                             )
                         }
                     }
+                    Text(
+                        text = "A source you turn off drops out of Browse, search and the " +
+                            "recommendation rows. Titles you already opened still open.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.InkTertiary,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+                    )
                 }
             }
 
@@ -329,7 +355,7 @@ fun SettingsScreen(vm: AppViewModel) {
                     Column {
                         Wordmark()
                         Text(
-                            text = "0.1 · manhwa only, English chapters",
+                            text = "0.2 · manhwa only, English chapters",
                             style = MaterialTheme.typography.bodySmall,
                             color = Palette.InkSecondary,
                         )
@@ -351,8 +377,12 @@ fun SettingsScreen(vm: AppViewModel) {
         onDismiss = { showSources = false },
         title = "Source",
     ) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            sources.forEach { source ->
+        // The list scrolls: the sheet is height-capped, and every installed source gets a card.
+        Column(
+            modifier = Modifier.verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            enabledSources.forEach { source ->
                 val selected = source.id == preferences.defaultSourceId
                 GlassCard(
                     modifier = Modifier

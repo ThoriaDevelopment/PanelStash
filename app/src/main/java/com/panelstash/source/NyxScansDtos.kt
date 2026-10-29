@@ -32,6 +32,8 @@ data class NyxPostDto(
     val seriesType: String? = null,
     val seriesStatus: String? = null,
     val isNovel: Boolean = false,
+    /** The genres the title was filed under; empty on the titles the site never categorised. */
+    val genres: List<NyxGenreDto> = emptyList(),
     val chapters: List<NyxChapterDto> = emptyList(),
 )
 
@@ -94,5 +96,6 @@ data class NyxImageDto(
 @Serializable
 data class NyxGenreDto(
     val id: Int = 0,
+    /** The site stores some names with a leading space (" School Life"); they are trimmed. */
     val name: String = "",
 )

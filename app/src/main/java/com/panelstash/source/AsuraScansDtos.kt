@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
 /**
  * Response shapes of the Asura Scans API, verified against the live endpoints on 2026-10-28:
  *
- *   GET /api/series?page=&limit=&sort=latest|popular|rating
+ *   GET /api/series?page=&limit=&sort=latest|popular|rating[&genre=slug]
+ *   GET /api/genres
  *   GET /api/search?q=&page=&limit=
  *   GET /api/series/{slug}
  *   GET /api/series/{slug}/chapters
@@ -40,6 +41,21 @@ data class AsuraSeriesDto(
     val type: String? = null,
     @SerialName("release_year") val releaseYear: Int? = null,
     @SerialName("chapter_count") val chapterCount: Int = 0,
+    /** Filed under these on the catalogue rows as well as the detail, so both carry them. */
+    val genres: List<AsuraGenreDto> = emptyList(),
+)
+
+@Serializable
+data class AsuraGenreDto(
+    val id: Int = 0,
+    val name: String = "",
+    /** The catalogue filters by slug, and a capitalised name is answered with an error. */
+    val slug: String = "",
+)
+
+@Serializable
+data class AsuraGenresResponse(
+    val data: List<AsuraGenreDto> = emptyList(),
 )
 
 @Serializable
