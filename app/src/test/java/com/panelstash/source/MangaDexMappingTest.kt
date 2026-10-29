@@ -99,14 +99,11 @@ class MangaDexMappingTest {
     }
 
     @Test
-    fun `external chapters keep their link and are listed as bookmarks`() {
+    fun `chapters hosted on a publisher's site never reach the chapter list`() {
         val dto = json.decodeFromString<ChapterListResponse>(externalChapterPayload).data.single()
         val chapter = dto.toSourceChapter()!!
         assertTrue(chapter.externalOnly)
-        assertEquals(
-            "https://www.webnovel.com/comic/15227640605485101",
-            chapter.externalUrl,
-        )
+        assertTrue(dedupeChapters(listOf(chapter)).isEmpty())
         // Other sources still hide their locked chapters; MangaDex asks for these on purpose.
         assertTrue(dedupeChapters(listOf(chapter)).isEmpty())
         assertEquals(1, dedupeChapters(listOf(chapter), includeExternal = true).size)

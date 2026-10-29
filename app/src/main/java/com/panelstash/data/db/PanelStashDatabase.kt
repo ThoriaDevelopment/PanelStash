@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ReadLaterEntity::class,
         DownloadEntity::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = true,
 )
 abstract class PanelStashDatabase : RoomDatabase() {
@@ -36,6 +36,18 @@ abstract class PanelStashDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Chapters hosted on a publisher's site are no longer listed at all, so the rows stored
+         * by earlier versions are removed. The column stays: dropping a column is not portable
+         * across the SQLite builds Android ships, and an empty column costs nothing. Resume and
+         * download rows for those chapters go with them through the existing cascade.
+         */
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DELETE FROM chapter WHERE externalUrl IS NOT NULL")
+            }
+        }
+
         @Volatile
         private var instance: PanelStashDatabase? = null
 
@@ -46,7 +58,7 @@ abstract class PanelStashDatabase : RoomDatabase() {
                     PanelStashDatabase::class.java,
                     "panelstash.db",
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                     .addCallback(object : Callback() {
                         /**
                          * A destructive fallback drops every row, which leaves the downloaded

@@ -51,7 +51,8 @@ Finding something to read:
 - Every source that publishes genres now hands them over, so a manhwa page lists what the title is filed under and recommendations can match on it.
 - Browse by genre on the sources that can filter by one: MangaDex, Flame, Kayn and Asura.
 - Above the Browse grid: a merged top ten, a "More in <genre>" row drawn from the genres you read most, and a "Because you read" row per recent title. The genre row carries a chip that opens Browse filtered to that genre.
-- When two sources carry the same title, the copy with more chapters wins, so a licensed entry with a handful of external links cannot stand in for a scanlation with hundreds.
+- When two sources carry the same title, the copy with more chapters wins, so a licensed entry with a handful of chapters cannot stand in for a scanlation with hundreds.
+- Chapters a site only links to and cannot serve are left out. Everything a manhwa page lists opens in the reader.
 
 Downloads:
 

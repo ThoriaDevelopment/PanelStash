@@ -186,7 +186,9 @@ class MangaDexSource(
             if (page.size < MangaDexApi.FEED_PAGE_SIZE) break
             offset += MangaDexApi.FEED_PAGE_SIZE
         }
-        return dedupeChapters(collected, includeExternal = true)
+        // Licensed chapters that live on a publisher's site are dropped like any other chapter
+        // without pages: the app reads what it can host itself.
+        return dedupeChapters(collected)
     }
 
     /**

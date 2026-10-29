@@ -1,7 +1,5 @@
 package com.panelstash.ui.screens
 
-import android.content.Intent
-import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -121,15 +119,8 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     var showJump by remember { mutableStateOf(false) }
     var jumpQuery by remember { mutableStateOf("") }
 
-    /** External chapters are bookmarks to the publisher; everything else opens in the reader. */
     fun openChapter(chapter: ChapterEntity, page: Int = 0) {
-        val url = chapter.externalUrl
-        if (url != null) {
-            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
-                .onFailure { vm.showMessage("No browser to open this chapter") }
-        } else {
-            vm.openChapter(chapter.id, page)
-        }
+        vm.openChapter(chapter.id, page)
     }
 
     LaunchedEffect(manhwaId) {
@@ -704,7 +695,6 @@ private fun ChapterCard(
     onDelete: () -> Unit,
 ) {
     val read = chapter.readAt != null
-    val external = chapter.externalUrl != null
 
     GlassCard(
         modifier = Modifier
@@ -762,7 +752,6 @@ private fun ChapterCard(
                 val subtitle = buildList {
                     if (!chapter.title.isNullOrBlank()) add(chapter.title)
                     if (chapter.pageCount > 0) add("${chapter.pageCount} pages")
-                    if (external) add("External · opens in browser")
                     if (isResumePoint) add("reading now")
                 }.joinToString(" · ")
                 if (subtitle.isNotEmpty()) {
@@ -779,8 +768,6 @@ private fun ChapterCard(
             Spacer(Modifier.width(8.dp))
 
             when {
-                external -> Eyebrow("EXTERNAL", color = Palette.Accent)
-
                 download == null -> IconButton(
                     glyph = Glyph.Download,
                     onClick = onDownload,
