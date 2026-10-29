@@ -344,7 +344,13 @@ fun ReaderScreen(vm: AppViewModel) {
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
                             last = change
-                            if (change.positionChange().getDistance() > viewConfiguration.touchSlop) {
+                            // Measured from where the finger went down, not from the previous
+                            // event: a slow scroll moves less than the slop between two frames,
+                            // so a per-event check let every slow drag end as a tap. A change
+                            // the scrollable has consumed is a drag whatever the distance.
+                            if (change.isConsumed ||
+                                (change.position - down.position).getDistance() > viewConfiguration.touchSlop
+                            ) {
                                 dragged = true
                             }
                             if (!change.pressed) break
