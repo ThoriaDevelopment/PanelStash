@@ -31,7 +31,7 @@ android {
         applicationId = "com.panelstash"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
+        versionCode = 5
         versionName = "0.2"
 
         ksp {

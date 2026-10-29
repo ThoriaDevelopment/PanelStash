@@ -2,6 +2,7 @@ package com.panelstash.ui
 
 import android.os.Environment
 import android.os.StatFs
+import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
@@ -19,12 +20,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -78,10 +81,14 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerInputChange
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
@@ -94,6 +101,7 @@ import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import com.panelstash.ui.theme.Palette
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -181,7 +189,6 @@ fun GlassCard(
  * Every interactive surface in the app goes through this: a spring-damped scale and a light
  * haptic tick, so a tap feels confirmed even before the screen reacts.
  */
-@OptIn(ExperimentalFoundationApi::class)
 fun Modifier.pressable(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
@@ -194,6 +201,10 @@ fun Modifier.pressable(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val feedback = LocalHapticFeedback.current
+    // The gesture below outlives a recomposition, so it reads the latest callbacks through state
+    // rather than closing over the ones from the composition that installed it.
+    val currentClick by rememberUpdatedState(onClick)
+    val currentHold by rememberUpdatedState(onLongClick)
     val scale by animateFloatAsState(
         targetValue = if (pressed && enabled) scaleDown else 1f,
         animationSpec = spring(dampingRatio = 0.5f, stiffness = Spring.StiffnessMedium),
@@ -217,16 +228,23 @@ fun Modifier.pressable(
         },
     ).then(
         if (onLongClick != null) {
-            Modifier.combinedClickable(
-                interactionSource = interaction,
-                indication = null,
-                enabled = enabled,
-                onClick = { tick(); onClick() },
-                onLongClick = {
-                    if (haptics) feedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                    onLongClick()
-                },
-            )
+            Modifier
+                .tapOrHold(
+                    interaction = interaction,
+                    enabled = enabled,
+                    onHoldArmed = {
+                        if (haptics) feedback.performHapticFeedback(HapticFeedbackType.LongPress)
+                    },
+                    onTap = { tick(); currentClick() },
+                    onHold = { currentHold?.invoke() },
+                )
+                // The gesture is hand-rolled, so the accessibility actions a clickable would
+                // have provided are declared here instead.
+                .semantics {
+                    role = Role.Button
+                    onClick { currentClick(); true }
+                    onLongClick { currentHold?.invoke(); true }
+                }
         } else {
             Modifier.clickable(
                 interactionSource = interaction,
@@ -236,6 +254,78 @@ fun Modifier.pressable(
             )
         },
     )
+}
+
+/**
+ * A tap, or a hold that only acts when the finger lifts without having travelled.
+ *
+ * [combinedClickable] fires its long press on a timer while the finger is still down. On a list
+ * that scrolls, pausing for half a second before dragging therefore reads as a hold, and for a
+ * followed title the hold action is unfollow: the shelf quietly loses the thing the reader was
+ * about to scroll past. Measuring from where the finger landed, and acting on the lift, keeps a
+ * hold that turns into a drag a drag.
+ */
+private fun Modifier.tapOrHold(
+    interaction: MutableInteractionSource,
+    enabled: Boolean,
+    onHoldArmed: () -> Unit,
+    onTap: () -> Unit,
+    onHold: () -> Unit,
+): Modifier = pointerInput(enabled) {
+    if (!enabled) return@pointerInput
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        // A control inside the card, such as a download button, already owns this press.
+        if (down.isConsumed) return@awaitEachGesture
+        val press = PressInteraction.Press(down.position)
+        // tryEmit rather than emit: the gesture block is a restricted coroutine and cannot
+        // suspend on the interaction source.
+        interaction.tryEmit(press)
+
+        var dragged = false
+        var armed = false
+        var ours = true
+        var up: PointerInputChange? = null
+
+        while (true) {
+            val elapsed = SystemClock.uptimeMillis() - down.uptimeMillis
+            // Resting long enough counts as a hold, acknowledged with a tick. The action waits for
+            // the lift, so a hold that becomes a drag is still a drag. Checked on every event as
+            // well as on the timeout timer, because a finger that jitters sends events of its own
+            // and the timer alone would never fire.
+            if (!armed && !dragged && elapsed >= viewConfiguration.longPressTimeoutMillis) {
+                armed = true
+                onHoldArmed()
+            }
+            val remaining = viewConfiguration.longPressTimeoutMillis - elapsed
+            val event = if (!armed && !dragged && remaining > 0) {
+                withTimeoutOrNull(remaining) { awaitPointerEvent() }
+            } else {
+                awaitPointerEvent()
+            }
+            if (event == null) continue
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            if (change.isConsumed) {
+                ours = false
+                break
+            }
+            if ((change.position - down.position).getDistance() > viewConfiguration.touchSlop) {
+                dragged = true
+            }
+            if (!change.pressed) {
+                up = change
+                break
+            }
+        }
+
+        if (!ours) {
+            interaction.tryEmit(PressInteraction.Cancel(press))
+            return@awaitEachGesture
+        }
+        interaction.tryEmit(PressInteraction.Release(press))
+        if (dragged || up == null) return@awaitEachGesture
+        if (armed) onHold() else onTap()
+    }
 }
 
 // ---------------------------------------------------------------------------
