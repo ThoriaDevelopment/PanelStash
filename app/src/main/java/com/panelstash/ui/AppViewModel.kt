@@ -25,6 +25,7 @@ import com.panelstash.source.Source
 import com.panelstash.source.SourceCapabilities
 import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
+import com.panelstash.update.UpdateState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -95,6 +96,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     val totalDownloadBytes: StateFlow<Long> = container.downloads.observeTotalBytes()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
+
+    /** Where the in-app updater is, observed by Settings. */
+    val update: StateFlow<UpdateState> = container.updater.state
+
+    val appVersion: String = container.updater.currentVersion
 
     val downloadGroups: StateFlow<List<DownloadGroup>> = container.downloads.observeAll()
         .map { rows ->
@@ -274,6 +280,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         container.discovery.invalidate()
         refreshDiscovery(force = true)
+    }
+
+    // --- updates ----------------------------------------------------------
+
+    /** [force] is the button; a quiet check is throttled inside the updater. */
+    fun checkForUpdate(force: Boolean = true) = container.updater.check(force)
+
+    fun downloadUpdate() = container.updater.download()
+
+    /** Opens the system installer, or says why it could not be opened. */
+    fun installUpdate() {
+        container.updater.install()?.let { _message.value = it }
     }
 
     fun clearImageCache() {

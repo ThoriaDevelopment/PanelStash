@@ -27,6 +27,7 @@ import com.panelstash.source.SourceGate
 import com.panelstash.source.SourceRegistry
 import com.panelstash.source.VortexScansSource
 import com.panelstash.source.WeebCentralSource
+import com.panelstash.update.Updater
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -77,6 +78,9 @@ class AppContainer(context: Context) {
     val downloads = DownloadStore(appContext, db, scope)
     val reader = ReaderRepository(sources, downloads, settings)
     val scheduler = DownloadScheduler(appContext)
+
+    /** GitHub releases on their own client: an update check must not borrow a source's gate. */
+    val updater = Updater(appContext, Network.apiClient(), scope)
 
     /**
      * Caches are sized explicitly rather than left to the defaults: reading and browsing are

@@ -44,6 +44,7 @@ import com.panelstash.ui.Glyph
 import com.panelstash.ui.GlassCard
 import com.panelstash.ui.PillButton
 import com.panelstash.ui.PillTone
+import com.panelstash.ui.ProgressBar
 import com.panelstash.ui.SectionTitle
 import com.panelstash.ui.SettingRow
 import com.panelstash.ui.Sheet
@@ -53,6 +54,7 @@ import com.panelstash.ui.Wordmark
 import com.panelstash.ui.formatBytes
 import com.panelstash.ui.pressable
 import com.panelstash.ui.theme.Palette
+import com.panelstash.update.UpdateState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -280,6 +282,14 @@ fun SettingsScreen(vm: AppViewModel) {
                 }
             }
 
+            item(key = "updates") {
+                SectionTitle("Updates", Modifier.padding(top = 8.dp))
+            }
+
+            item(key = "update") {
+                UpdateCard(vm)
+            }
+
             item(key = "sources") {
                 SectionTitle("Sources", Modifier.padding(top = 8.dp))
             }
@@ -355,7 +365,7 @@ fun SettingsScreen(vm: AppViewModel) {
                     Column {
                         Wordmark()
                         Text(
-                            text = "0.2 · manhwa only, English chapters",
+                            text = "${vm.appVersion} · manhwa only, English chapters",
                             style = MaterialTheme.typography.bodySmall,
                             color = Palette.InkSecondary,
                         )
@@ -425,6 +435,123 @@ fun SettingsScreen(vm: AppViewModel) {
             }
         }
     }
+}
+
+/**
+ * The updater in one card: the installed version, what the last check found, and the one action
+ * that makes sense next. A download keeps running if the screen is left, so its progress is
+ * drawn here rather than in a dialog that would have to be dismissed to get anything else done.
+ */
+@Composable
+private fun UpdateCard(vm: AppViewModel) {
+    val state by vm.update.collectAsState()
+    // Read once into a local: `state` is delegated, so it cannot be smart cast inside `when`.
+    val current = state
+
+    // Settings is where someone looks for an update, so one quiet check runs on the way in. The
+    // updater throttles it and ignores it while a download or an install is waiting.
+    LaunchedEffect(Unit) { vm.checkForUpdate(force = false) }
+
+    val downloading = current as? UpdateState.Downloading
+
+    Column {
+        SettingRow(
+            title = "PanelStash ${vm.appVersion}",
+            subtitle = current.statusText(),
+            trailing = {
+                Eyebrow(
+                    text = current.badgeText(),
+                    color = when (current) {
+                        is UpdateState.Failed -> Palette.Danger
+                        is UpdateState.UpToDate, is UpdateState.Ready -> Palette.Success
+                        else -> Palette.Accent
+                    },
+                )
+            },
+        )
+
+        if (downloading != null) {
+            Spacer(Modifier.height(8.dp))
+            val fraction = if (downloading.total > 0) {
+                downloading.received.toFloat() / downloading.total
+            } else {
+                0f
+            }
+            ProgressBar(fraction, Modifier.padding(horizontal = 4.dp))
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            when (current) {
+                is UpdateState.Checking -> PillButton(
+                    text = "Checking…",
+                    glyph = Glyph.Refresh,
+                    enabled = false,
+                    onClick = {},
+                )
+
+                is UpdateState.Available -> PillButton(
+                    text = "Download ${current.version}",
+                    glyph = Glyph.Download,
+                    tone = PillTone.Accent,
+                    onClick = { vm.downloadUpdate() },
+                )
+
+                is UpdateState.Downloading -> PillButton(
+                    text = "Downloading…",
+                    glyph = Glyph.Download,
+                    enabled = false,
+                    onClick = {},
+                )
+
+                is UpdateState.Ready -> PillButton(
+                    text = "Install",
+                    glyph = Glyph.Download,
+                    tone = PillTone.Accent,
+                    onClick = { vm.installUpdate() },
+                )
+
+                else -> PillButton(
+                    text = "Check for updates",
+                    glyph = Glyph.Refresh,
+                    onClick = { vm.checkForUpdate() },
+                )
+            }
+        }
+
+        Text(
+            text = "The update installs over this copy, so downloads and reading progress are kept.",
+            style = MaterialTheme.typography.bodySmall,
+            color = Palette.InkTertiary,
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
+        )
+    }
+}
+
+private fun UpdateState.statusText(): String = when (this) {
+    UpdateState.Idle -> "Checks GitHub for a newer release."
+    UpdateState.Checking -> "Looking for a newer release…"
+    UpdateState.UpToDate -> "This is the newest release."
+    is UpdateState.Available -> "Version $version is available · ${formatBytes(size)}."
+    is UpdateState.Downloading -> "Downloading $version · ${formatBytes(received)}" +
+        if (total > 0) " of ${formatBytes(total)}" else ""
+    is UpdateState.Ready -> "Version $version is downloaded. Install it to update."
+    is UpdateState.Failed -> message
+}
+
+private fun UpdateState.badgeText(): String = when (this) {
+    UpdateState.Idle -> "CHECK"
+    UpdateState.Checking -> "CHECKING"
+    UpdateState.UpToDate -> "UP TO DATE"
+    is UpdateState.Available -> "AVAILABLE"
+    is UpdateState.Downloading -> if (total > 0) {
+        "${(received.toFloat() / total * 100).toInt().coerceIn(0, 100)}%"
+    } else {
+        "DOWNLOADING"
+    }
+    is UpdateState.Ready -> "READY"
+    is UpdateState.Failed -> "FAILED"
 }
 
 private fun com.panelstash.source.Source.capabilitySummary(): String {
