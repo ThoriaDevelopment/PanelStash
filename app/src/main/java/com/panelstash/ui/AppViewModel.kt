@@ -167,6 +167,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Per-source offsets while the search is showing every installed source. */
     private var searchOffsets: Map<String, Int> = emptyMap()
     private var readerJob: Job? = null
+    private var advanceJob: Job? = null
     private var browseJob: Job? = null
     private var discoveryJob: Job? = null
     private var similarJob: Job? = null
@@ -963,10 +964,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { library.markRead(chapterId, read) }
     }
 
-    /** Called when the end-of-chapter circle completes. Resume moves to the next chapter. */
+    /**
+     * Called when the end-of-chapter circle completes. Resume moves to the next chapter.
+     *
+     * A trigger for a chapter that is no longer open is ignored, and a second one while the first
+     * is still resolving is dropped: each would resolve "the next chapter" against whatever is
+     * open by then, which skips a chapter without the reader ever seeing it.
+     */
     fun advance(chapterId: Long) {
-        val state = _reader.value ?: return
-        viewModelScope.launch {
+        if (advanceJob?.isActive == true) return
+        val state = _reader.value?.takeIf { it.chapter.id == chapterId } ?: return
+        advanceJob = viewModelScope.launch {
             library.markRead(chapterId, read = true)
             val next = library.nextChapter(state.manhwa.id, chapterId)
             if (next == null) {

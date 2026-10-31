@@ -59,7 +59,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
@@ -92,7 +91,6 @@ import com.panelstash.ui.theme.Palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
 
@@ -150,26 +148,12 @@ fun ReaderScreen(vm: AppViewModel) {
             val bands = IntArray(pages.size) { index ->
                 val page = pages[index]
                 val measured = page.aspectOrNull()
-                val aspect = measured ?: measuredAspects[page.key]
-                if (aspect == null || aspect <= 0f || widthPx <= 0 || heightPx <= 0) {
-                    1
-                } else {
-                    val displayHeight = widthPx / aspect
-                    // A page the source measured is decoded at exactly its own size, so only the
-                    // bitmap ceiling forces bands. A page nobody measured is requested blind and
-                    // comes back sampled to a guess, so anything more than a couple of screens
-                    // tall is worth cutting to get the detail back.
-                    val limit = if (measured != null) {
-                        MAX_BITMAP_DIMENSION.toFloat()
-                    } else {
-                        heightPx * UNMEASURED_PAGE_SCREENS
-                    }
-                    if (displayHeight <= limit) {
-                        1
-                    } else {
-                        ceil(displayHeight / heightPx).toInt().coerceIn(2, MAX_PAGE_BANDS)
-                    }
-                }
+                pageBandCount(
+                    widthPx = widthPx,
+                    heightPx = heightPx,
+                    aspect = measured ?: measuredAspects[page.key],
+                    measured = measured != null,
+                )
             }
             val firstSlot = IntArray(pages.size)
             var total = 0
@@ -193,7 +177,6 @@ fun ReaderScreen(vm: AppViewModel) {
     // page that turns into bands is seen at its new index rather than the one it had at launch.
     val liveSlots by rememberUpdatedState(slots)
 
-    var armed by remember(current.chapter.id) { mutableStateOf(false) }
     var markedFinished by remember(current.chapter.id) { mutableStateOf(false) }
     var chromeVisible by remember(current.chapter.id) { mutableStateOf(true) }
     var showChapters by remember { mutableStateOf(false) }
@@ -241,13 +224,6 @@ fun ReaderScreen(vm: AppViewModel) {
         }
     }
 
-    // The end ring is a session event: it only arms once the user actually scrolls.
-    LaunchedEffect(current.chapter.id) {
-        snapshotFlow { listState.firstVisibleItemScrollOffset }
-            .drop(1)
-            .collect { armed = true }
-    }
-
     LaunchedEffect(current.chapter.id) {
         snapshotFlow { listState.firstVisibleItemIndex }.collect { slot ->
             if (!resumeApplied) return@collect
@@ -266,62 +242,58 @@ fun ReaderScreen(vm: AppViewModel) {
         }
     }
 
-    val endIndex = slots.count
-
     /**
-     * How far the trailing viewport has been scrolled in: 0 when it first shows at the bottom, 1
-     * when it has filled the screen. The end card is pinned over exactly this stretch, so the
-     * ring fills in place instead of the card scrolling away from the reader.
+     * The trailing viewport as the current layout sees it: how much of the window the list's last
+     * item covers. 0 while it is off screen, 1 once it fills the window.
+     *
+     * It is read from the layout's own last item rather than from a remembered item index. A page
+     * that turns into bands, or one whose shape is corrected when its bytes land, changes the item
+     * count mid-chapter, and a remembered index then names an ordinary page that can be tall
+     * enough to look exactly like the end.
      */
-    // Keyed on the item count as well: a page that turns out to be a banded strip adds items, and
-    // the trailing viewport moves with them.
-    val endProgress = remember(current.chapter.id, endIndex) {
+    val endFill = remember(current.chapter.id) {
         derivedStateOf {
             val layout = listState.layoutInfo
-            val info = layout.visibleItemsInfo.firstOrNull { it.index == endIndex }
+            val last = layout.visibleItemsInfo.lastOrNull() ?: return@derivedStateOf 0f
+            if (last.index != layout.totalItemsCount - 1) return@derivedStateOf 0f
             val viewport = layout.viewportSize.height
-            if (info == null || info.size <= 0 || viewport <= 0) {
+            if (last.size <= 0 || viewport <= 0) {
                 0f
             } else {
-                ((viewport - info.offset).toFloat() / info.size).coerceIn(0f, 1f)
+                ((viewport - last.offset).toFloat() / last.size).coerceIn(0f, 1f)
             }
         }
     }
 
-    /** True while the trailing viewport is on screen, i.e. the chapter's pages are behind us. */
-    val endVisible = remember(current.chapter.id, endIndex) {
-        derivedStateOf {
-            listState.layoutInfo.visibleItemsInfo.any { it.index == endIndex }
-        }
-    }
+    // True while a finger is on the page. The ring only fills while the reader is actually
+    // dragging it: a fling that carries the list past the last page is distance nobody asked for,
+    // and completing the ring from it turned the chapter over under the reader's thumb.
+    var fingerDown by remember(current.chapter.id) { mutableStateOf(false) }
 
-    /** True once the trailing viewport is fully on screen, i.e. the list is scrolled to its end. */
-    val atBottom = remember(current.chapter.id) {
-        derivedStateOf {
-            val layout = listState.layoutInfo
-            val last = layout.visibleItemsInfo.lastOrNull()
-            last != null && last.index == layout.totalItemsCount - 1 && last.offset <= 0
-        }
-    }
-
-    // Kept as a running maximum: a fling can carry the card out of view in a single frame, and
-    // the ring should not fall back to empty once the user has scrolled that far.
+    // Kept as a running maximum: a finger that reaches the end and lifts there keeps its fill.
     // A boxed Float would allocate on every scroll frame; this state is written that often.
     var ringFilled by remember(current.chapter.id) { mutableFloatStateOf(0f) }
     LaunchedEffect(current.chapter.id) {
-        snapshotFlow { endProgress.value }.collect { value ->
-            if (value > ringFilled) ringFilled = value
+        snapshotFlow { fingerDown to endFill.value }.collect { (dragging, fill) ->
+            if (fill <= 0f) {
+                // Scrolling back out of the end means the chapter is being read again, so the
+                // ring has to be earned again rather than jump back to full on the next touch.
+                ringFilled = 0f
+            } else if (dragging && fill > ringFilled) {
+                ringFilled = fill
+            }
         }
     }
 
-    val progress = when {
-        !armed -> 0f
-        atBottom.value -> 1f
-        else -> ringFilled
-    }
-
-    LaunchedEffect(current.chapter.id, progress) {
-        if (armed && progress >= 0.985f) vm.advance(current.chapter.id)
+    // One shot per chapter: two frames that both look complete must not open two chapters.
+    var advanced by remember(current.chapter.id) { mutableStateOf(false) }
+    LaunchedEffect(current.chapter.id) {
+        snapshotFlow { ringFilled }.collect { value ->
+            if (value >= 0.985f && !advanced) {
+                advanced = true
+                vm.advance(current.chapter.id)
+            }
+        }
     }
 
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -337,6 +309,9 @@ fun ReaderScreen(vm: AppViewModel) {
                     var tapScrollJob: Job? = null
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
+                        // The end ring may only fill under a finger, so the drag has to be visible
+                        // to the end-of-chapter logic above.
+                        fingerDown = true
                         tapScrollJob?.cancel()
                         var dragged = false
                         var last = down
@@ -355,6 +330,9 @@ fun ReaderScreen(vm: AppViewModel) {
                             }
                             if (!change.pressed) break
                         }
+                        // The finger is up: whatever the list does from here is a fling, and a
+                        // fling must never be able to complete the ring.
+                        fingerDown = false
                         // A drag belongs to the scrollable, and a long hold was the reader
                         // deliberately stopping the page, so neither counts as a tap.
                         val heldFor = last.uptimeMillis - down.uptimeMillis
@@ -435,37 +413,26 @@ fun ReaderScreen(vm: AppViewModel) {
                 }
             }
 
-            // One viewport of travel after the last page. The end card is drawn over this,
-            // pinned in the middle, so it is still there while the ring fills and the chapter
-            // has not turned over yet. Without the item the list would end on the last page and
-            // the card could never be reached.
+            // One viewport of travel after the last page, with the end card drawn inside it. The
+            // card therefore scrolls in with this empty stretch and can never sit over the last
+            // page, which is what a card pinned to the window does — and it cannot be tapped
+            // before it is visible either. Without the item the list would end on the last page
+            // and the card could never be reached.
             item {
                 Box(
                     Modifier
                         .fillMaxWidth()
                         .fillParentMaxHeight(1f)
                         .background(Color.Black),
-                )
-            }
-        }
-
-        // The card fades in with the trailing viewport and stays put until the chapter turns
-        // over, so "Keep scrolling" is still on screen at the moment the next chapter opens.
-        // It carries no pointer input of its own, so tapping beside it still scrolls the list.
-        if (endVisible.value && progress > 0.01f) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black)
-                    .graphicsLayer { alpha = progress.coerceIn(0f, 1f) },
-                contentAlignment = Alignment.Center,
-            ) {
-                EndCard(
-                    progress = progress,
-                    hasNext = current.nextChapterId != null,
-                    onAdvance = { vm.advance(current.chapter.id) },
-                    onDetails = { showChapters = true },
-                )
+                    contentAlignment = Alignment.Center,
+                ) {
+                    EndCard(
+                        progress = ringFilled,
+                        hasNext = current.nextChapterId != null,
+                        onAdvance = { vm.advance(current.chapter.id) },
+                        onDetails = { showChapters = true },
+                    )
+                }
             }
         }
 
@@ -655,7 +622,15 @@ private fun LazyItemScope.ReaderPageImage(
     )
 }
 
-/** Conservative ceiling for a decoded page on GPUs whose texture limit is 8192 px. */
+/**
+ * Conservative ceiling for a page drawn as one bitmap on GPUs whose texture limit is 8192 px.
+ *
+ * It is also what decides banding. A page taller than this at screen width cannot be a hardware
+ * bitmap, so it decodes in software — and a 1080 x 16,384 software bitmap is 70 MB, far past what
+ * a phone can hold for more than one page. A run of 13,000 px strips (Asura's, for instance) would
+ * exhaust the heap mid-chapter, which is why the limit here is the texture size, not the bitmap
+ * ceiling below.
+ */
 private const val MAX_HARDWARE_DIMENSION = 8_192
 
 /** Bands a single page may be cut into. Past this the page is pathological, not a webtoon. */
@@ -664,7 +639,7 @@ private const val MAX_PAGE_BANDS = 60
 /** How many screens a page of unknown height may be before it is worth cutting into bands. */
 private const val UNMEASURED_PAGE_SCREENS = 2f
 
-/** Even a software bitmap has to fit in memory; taller strips are downscaled to this. */
+/** Last-resort cap for a single request, for a page whose height nobody has measured yet. */
 private const val MAX_BITMAP_DIMENSION = 16_384
 
 /** How much of the readable screen a tap carries the reader forward. */
@@ -678,6 +653,26 @@ private const val POSITION_UNIT = 1_000_000L
 
 /** How many frames a tap gives the previous scroll session to release the list. */
 private const val TAP_SCROLL_TRIES = 3
+
+/**
+ * How many bands a page is cut into at [widthPx].
+ *
+ * A page the source measured is decoded at exactly its own size, so the texture limit is what
+ * forces bands. A page nobody measured is requested blind and comes back sampled to a guess, so
+ * anything more than a couple of screens tall is banded to get its detail back.
+ */
+internal fun pageBandCount(
+    widthPx: Int,
+    heightPx: Int,
+    aspect: Float?,
+    measured: Boolean,
+): Int {
+    if (aspect == null || aspect <= 0f || widthPx <= 0 || heightPx <= 0) return 1
+    val displayHeight = widthPx / aspect
+    val limit = if (measured) MAX_HARDWARE_DIMENSION.toFloat() else heightPx * UNMEASURED_PAGE_SCREENS
+    if (displayHeight <= limit) return 1
+    return ceil(displayHeight / heightPx).toInt().coerceIn(2, MAX_PAGE_BANDS)
+}
 
 @Composable
 private fun ReaderTopBar(title: String, chapter: String, onBack: () -> Unit) {

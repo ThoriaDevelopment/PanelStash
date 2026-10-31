@@ -489,7 +489,9 @@ fun GlyphIcon(
                     size = Size(14.8f * u, 14.8f * u),
                     style = line,
                 )
-                drawPath(path(15.4f, 3.6f, 16.4f, 8.4f, 11.6f, 8.6f), tint, style = line)
+                // The head points along the sweep (clockwise, down the right-hand side). Drawn
+                // the other way round it read as an arrow travelling back into the gap.
+                drawPath(path(13.1f, 6.2f, 18f, 7.4f, 15.6f, 2.9f), tint, style = line)
             }
 
             Glyph.Play -> drawPath(path(8.6f, 5.6f, 18.6f, 12f, 8.6f, 18.4f, close = true), tint)
