@@ -65,6 +65,14 @@ object Network {
         host.endsWith("compsci88.com") -> "https://weebcentral.com/"
         host.endsWith("mangapill.com") -> "https://mangapill.com/"
         host.endsWith("readdetectiveconan.com") -> "https://mangapill.com/"
+        // Arena Scans and Lua Comic serve their pages from their own CDNs.
+        host.endsWith("arenascan.com") -> "https://arenascan.com/"
+        host.endsWith("luacomic.org") -> "https://luacomic.org/"
+        // Mgeko and the image hosts its reader points at.
+        host.endsWith("mgeko.cc") -> "https://www.mgeko.cc/"
+        host.endsWith("mangageko.com") -> "https://www.mgeko.cc/"
+        host.endsWith("imgsrv4.com") -> "https://www.mgeko.cc/"
+        host.endsWith("imgsrv5.com") -> "https://www.mgeko.cc/"
         else -> null
     }
 }

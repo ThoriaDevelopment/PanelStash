@@ -14,12 +14,15 @@ import com.panelstash.data.Settings
 import com.panelstash.data.db.PanelStashDatabase
 import com.panelstash.download.DownloadScheduler
 import com.panelstash.download.DownloadStore
+import com.panelstash.source.ArenaScansSource
 import com.panelstash.source.AsuraScansSource
 import com.panelstash.source.AtHomeReporter
 import com.panelstash.source.FlameComicsSource
 import com.panelstash.source.KaynScansSource
+import com.panelstash.source.LuaComicSource
 import com.panelstash.source.MangaDexSource
 import com.panelstash.source.MangaPillSource
+import com.panelstash.source.MgekoSource
 import com.panelstash.source.Network
 import com.panelstash.source.NyxScansSource
 import com.panelstash.source.OrionScansSource
@@ -68,6 +71,9 @@ class AppContainer(context: Context) {
             FlameComicsSource(apiClient, SourceGate()),
             WeebCentralSource(apiClient, SourceGate()),
             MangaPillSource(apiClient, SourceGate()),
+            ArenaScansSource(apiClient, SourceGate()),
+            LuaComicSource(apiClient, SourceGate()),
+            MgekoSource(apiClient, SourceGate()),
         ),
         // Read on every access, so switching a source off takes effect without a restart.
         disabled = { settings.current.disabledSourceIds },

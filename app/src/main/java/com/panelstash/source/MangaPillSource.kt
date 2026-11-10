@@ -260,6 +260,8 @@ internal fun parseMangaPillPages(html: String): List<PageImage> =
 internal fun unescapeHtml(text: String): String = text
     .replace("&quot;", "\"")
     .replace("&#039;", "'")
+    .replace("&#39;", "'")
+    .replace("&#x27;", "'")
     .replace("&apos;", "'")
     .replace("&lt;", "<")
     .replace("&gt;", ">")
