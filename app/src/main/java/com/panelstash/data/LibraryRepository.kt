@@ -37,6 +37,69 @@ data class SearchPage(
 /** Catalogue rows the reader never touched are dropped after this long. */
 private const val CATALOGUE_TTL_MS = 30L * 24 * 60 * 60 * 1000
 
+/** Reading order: numbered chapters by value, unnumbered ones after them. */
+private val CHAPTER_ORDER =
+    compareBy<ChapterEntity> { it.sortKey == null }
+        .thenBy { it.sortKey ?: 0.0 }
+        .thenBy { it.numberText }
+
+/**
+ * One chapter per chapter number, across every source that carries the title.
+ *
+ * A chapter only one source publishes is kept as it is, which is what makes a profile whole:
+ * provider A's chapters 3–13, B's 1–3 and C's 13–59 read as 1–59 instead of starting at 13.
+ * Where two sources publish the same number, a readable upload wins, because an external-only
+ * entry is a link to a publisher's site rather than something that can be read here; between two
+ * readable copies the first-ranked source wins, which the repository's [rank] decides.
+ */
+internal fun mergeChapters(
+    chapters: List<ChapterEntity>,
+    rank: (String) -> Int,
+): List<ChapterEntity> {
+    val best = LinkedHashMap<String, ChapterEntity>()
+    for (chapter in chapters) {
+        val key = chapter.numberText.trim()
+        val held = best[key]
+        if (held == null || beats(chapter, held, rank)) best[key] = chapter
+    }
+    return best.values.sortedWith(CHAPTER_ORDER)
+}
+
+/**
+ * A title as a comparison key: letters and digits only, with a bracketed annotation dropped, so
+ * "Solo Leveling (Official)" and "Solo Leveling" are the same title.
+ */
+internal fun normaliseTitle(value: String): String = value
+    .replace(Regex("\\([^)]*\\)|\\[[^]]*]|【[^】]*】"), " ")
+    .lowercase()
+    .filter { it.isLetterOrDigit() }
+
+/** Every spelling of a title, as comparison keys. */
+internal fun nameKeys(names: List<String>): Set<String> =
+    names.map { normaliseTitle(it) }.filter { it.isNotBlank() }.toSet()
+
+/**
+ * True when any spelling of one title is any spelling of the other. Sources publish the alternates
+ * a series goes by, which is how one work is recognised under two names: MangaDex lists "Revenge
+ * of the Baskerville Bloodhound" among the alternates of the series Asura Scans calls "Revenge of
+ * the Iron-Blooded Sword Hound".
+ */
+internal fun sameTitle(one: List<String>, other: List<String>): Boolean {
+    val left = nameKeys(one)
+    val right = nameKeys(other)
+    return left.any(right::contains)
+}
+
+private fun beats(candidate: ChapterEntity, held: ChapterEntity, rank: (String) -> Int): Boolean {
+    val candidateReadable = candidate.externalUrl == null
+    val heldReadable = held.externalUrl == null
+    if (candidateReadable != heldReadable) return candidateReadable
+    val candidateRank = rank(candidate.sourceId)
+    val heldRank = rank(held.sourceId)
+    if (candidateRank != heldRank) return candidateRank < heldRank
+    return candidate.pageCount > held.pageCount
+}
+
 class LibraryRepository(
     private val sources: SourceRegistry,
     private val db: PanelStashDatabase,
@@ -50,6 +113,13 @@ class LibraryRepository(
     fun observeManhwa(id: Long): Flow<ManhwaEntity?> = manhwaDao.observe(id)
 
     fun observeChapters(manhwaId: Long): Flow<List<ChapterEntity>> = chapterDao.observeForManhwa(manhwaId)
+
+    /**
+     * One profile's chapters, across every stored copy of the title. [mergeChapters] collapses a
+     * chapter number that several sources publish into the copy the reader should get.
+     */
+    fun observeChaptersFor(manhwaIds: List<Long>): Flow<List<ChapterEntity>> =
+        chapterDao.observeForManhwas(manhwaIds)
 
     fun observeContinueReading(): Flow<List<ContinueRow>> = manhwaDao.observeContinueReading()
 
@@ -188,6 +258,16 @@ class LibraryRepository(
     /** Every source the app knows, including ones switched off in settings. */
     fun allSources(): List<Source> = sources.everything
 
+    /**
+     * Which source's copy of a chapter wins when two of them publish the same number. MangaDex
+     * first, Asura Scans second, and then the order the app registers the rest in.
+     */
+    fun sourceRank(sourceId: String): Int = when (sourceId) {
+        "mangadex" -> 0
+        "asurascans" -> 1
+        else -> 2 + sources.everything.indexOfFirst { it.id == sourceId }.coerceAtLeast(0)
+    }
+
     suspend fun manhwaByRemote(sourceId: String, remoteId: String): ManhwaEntity? =
         manhwaDao.byRemote(sourceId, remoteId)
 
@@ -215,6 +295,41 @@ class LibraryRepository(
         return null
     }
 
+    /**
+     * Every installed source that carries this series, not just the first. A profile merges their
+     * chapter lists, so all of them are needed at once.
+     *
+     * [names] is the title together with the alternates the opening source publishes for it, and
+     * a candidate matches when any of its own names matches any of these, which is how a series
+     * that two sites title differently is still recognised as one.
+     *
+     * A source that fails is skipped: one site being down must not stop the others from filling
+     * in the chapters it is missing.
+     */
+    suspend fun findEverywhere(
+        names: List<String>,
+        excluding: Set<String>,
+    ): List<Pair<Source, SourceManhwa>> = coroutineScope {
+        val wanted = nameKeys(names)
+        val query = names.firstOrNull { normaliseTitle(it).isNotBlank() }
+        if (wanted.isEmpty() || query == null) return@coroutineScope emptyList()
+        sources.all
+            .filter { it.id !in excluding }
+            .map { source ->
+                async {
+                    // The site's own search is the way in; the alternates are what make a hit on
+                    // a differently-titled copy count as the same series.
+                    val candidates = runCatching { source.search(query, 0, 20) }
+                        .getOrNull()
+                        .orEmpty()
+                    candidates.firstOrNull { sameTitle(names, listOf(it.title) + it.aliases) }
+                        ?.let { source to it }
+                }
+            }
+            .awaitAll()
+            .filterNotNull()
+    }
+
     /** Page counts arrive with the chapter, or after the first read on sources that omit them. */
     suspend fun updatePageCount(chapterId: Long, pageCount: Int) {
         val chapter = chapterDao.byId(chapterId) ?: return
@@ -222,14 +337,6 @@ class LibraryRepository(
         chapterDao.update(chapter.copy(pageCount = pageCount))
     }
 
-    /**
-     * A title as a comparison key: letters and digits only, with a bracketed annotation dropped,
-     * so "Solo Leveling (Official)" and "Solo Leveling" are the same title.
-     */
-    private fun normaliseTitle(value: String): String = value
-        .replace(Regex("\\([^)]*\\)|\\[[^]]*]|【[^】]*】"), " ")
-        .lowercase()
-        .filter { it.isLetterOrDigit() }
 
     /** Loads a manhwa from its source and refreshes its chapter list. Returns the local id. */
     suspend fun openManhwa(sourceId: String, remoteId: String): Long {
@@ -341,6 +448,26 @@ class LibraryRepository(
         val index = all.indexOfFirst { it.id == chapterId }
         return if (index >= 0 && index + 1 < all.size) all[index + 1] else null
     }
+
+    /**
+     * The next readable chapter after [chapterId] in the merged list of a title, so a chapter that
+     * only one source carries still leads into the next one, whichever source has it.
+     */
+    suspend fun nextChapterIn(
+        manhwaIds: List<Long>,
+        chapterId: Long,
+        /** The title's source order, so a pinned source continues to win the next chapter too. */
+        rank: (String) -> Int = { sourceRank(it) },
+    ): ChapterEntity? {
+        val merged = mergeChapters(chapterDao.listForManhwas(manhwaIds), rank)
+            .filter { it.externalUrl == null }
+        val index = merged.indexOfFirst { it.id == chapterId }
+        return if (index >= 0 && index + 1 < merged.size) merged[index + 1] else null
+    }
+
+    /** True when any copy of the title has something that can actually be read in the app. */
+    suspend fun hasReadableChapter(manhwaIds: List<Long>): Boolean =
+        chapterDao.listForManhwas(manhwaIds).any { it.externalUrl == null }
 
     /** Where "Continue Reading" should land: the resume point, else the first chapter. */
     suspend fun continuePoint(manhwaId: Long): Pair<ChapterEntity, Int>? {

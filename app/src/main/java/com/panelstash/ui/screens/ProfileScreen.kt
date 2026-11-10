@@ -117,10 +117,13 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     var pendingDownload by remember { mutableStateOf<List<ChapterEntity>?>(null) }
     var pendingBatch by remember { mutableStateOf<List<ChapterEntity>?>(null) }
     var showJump by remember { mutableStateOf(false) }
+    var showSourcePicker by remember { mutableStateOf(false) }
     var jumpQuery by remember { mutableStateOf("") }
 
+    // The profile is the owner of every chapter it opens, including ones merged in from another
+    // source, so reading across sources keeps one resume point and one Library entry.
     fun openChapter(chapter: ChapterEntity, page: Int = 0) {
-        vm.openChapter(chapter.id, page)
+        vm.openChapter(chapter.id, page, manhwaId)
     }
 
     LaunchedEffect(manhwaId) {
@@ -240,6 +243,9 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         } else {
             current.chapters
         }
+        // Only a profile built from several sources needs a label per chapter; one that comes
+        // from a single source would just repeat the same name down the whole list.
+        val spansSources = current.chapters.map { it.sourceId }.distinct().size > 1
 
         LazyColumn(
             state = listState,
@@ -365,6 +371,32 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         enabled = downloadable.isNotEmpty(),
                         onClick = { startDownload(downloadable) },
                     )
+                }
+            }
+
+            // A title read from several sources lets the reader pin the one they trust for it;
+            // only shown when there is more than one to choose between.
+            if (spansSources) {
+                item(key = "preferred-source") {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp)
+                            .padding(bottom = 8.dp),
+                    ) {
+                        PillButton(
+                            text = current.preferredSourceId
+                                ?.let { "${vm.sourceName(it)} first" }
+                                ?: "All sources",
+                            glyph = Glyph.Filter,
+                            tone = if (current.preferredSourceId != null) {
+                                PillTone.Accent
+                            } else {
+                                PillTone.Glass
+                            },
+                            onClick = { showSourcePicker = true },
+                        )
+                    }
                 }
             }
 
@@ -515,6 +547,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                     else -> items(ordered, key = { it.id }) { chapter ->
                         ChapterCard(
                             chapter = chapter,
+                            sourceName = if (spansSources) vm.sourceName(chapter.sourceId) else null,
                             isResumePoint = chapter.id == current.resumeChapterId,
                             download = current.downloads[chapter.id],
                             onOpen = {
@@ -538,6 +571,40 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     }
 
     Sheet(
+        visible = showSourcePicker,
+        onDismiss = { showSourcePicker = false },
+        title = "Preferred source",
+    ) {
+        val pinned = current?.preferredSourceId
+        val carrying = current?.chapters.orEmpty()
+            .map { it.sourceId }
+            .distinct()
+            .sortedBy(vm::sourceName)
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            SourceChoice(
+                title = "All sources",
+                subtitle = "Best copy of each chapter: MangaDex, then Asura Scans, then the rest.",
+                selected = pinned == null,
+                onClick = {
+                    vm.setPreferredSource(manhwaId, null)
+                    showSourcePicker = false
+                },
+            )
+            for (id in carrying) {
+                SourceChoice(
+                    title = vm.sourceName(id),
+                    subtitle = "Use this source's copy of a chapter whenever it has one.",
+                    selected = pinned == id,
+                    onClick = {
+                        vm.setPreferredSource(manhwaId, id)
+                        showSourcePicker = false
+                    },
+                )
+            }
+        }
+    }
+
+    Sheet(
         visible = showJump,
         onDismiss = { showJump = false },
         title = "Jump to chapter",
@@ -545,6 +612,8 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
         val chapterList = current?.chapters.orEmpty()
         val firstUnread = chapterList.firstOrNull { it.readAt == null && it.externalUrl == null }
         val readableChapters = chapterList.filter { it.externalUrl == null }
+        // This sheet is outside the profile's column, so it works the flag out again.
+        val merged = chapterList.map { it.sourceId }.distinct().size > 1
         // One scroller for the actions, the search field and the chapters. The list used to sit
         // in a fixed 240dp window inside a fixed-height sheet, which left everything past the
         // fold unreachable exactly when a series is long enough to need the jump sheet.
@@ -646,6 +715,13 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         color = Palette.Ink,
                         modifier = Modifier.weight(1f),
                     )
+                    if (merged) {
+                        Eyebrow(
+                            vm.sourceName(chapter.sourceId),
+                            Modifier.padding(horizontal = 8.dp),
+                            color = Palette.InkSecondary,
+                        )
+                    }
                     Eyebrow(
                         if (chapter.id == current?.resumeChapterId) {
                             "READING"
@@ -685,8 +761,43 @@ private fun Backdrop(url: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
+private fun SourceChoice(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .pressable(onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium,
+                color = Palette.Ink,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = Palette.InkSecondary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (selected) Eyebrow("PREFERRED", color = Palette.Accent)
+    }
+}
+
+@Composable
 private fun ChapterCard(
     chapter: ChapterEntity,
+    /** Which source this chapter came from, when the profile merges more than one. */
+    sourceName: String? = null,
     isResumePoint: Boolean,
     download: DownloadEntity?,
     onOpen: () -> Unit,
@@ -752,6 +863,7 @@ private fun ChapterCard(
                 val subtitle = buildList {
                     if (!chapter.title.isNullOrBlank()) add(chapter.title)
                     if (chapter.pageCount > 0) add("${chapter.pageCount} pages")
+                    if (sourceName != null) add(sourceName)
                     if (isResumePoint) add("reading now")
                 }.joinToString(" · ")
                 if (subtitle.isNotEmpty()) {

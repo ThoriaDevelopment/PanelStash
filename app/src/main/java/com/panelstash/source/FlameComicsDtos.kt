@@ -66,6 +66,8 @@ data class FlameSeriesDto(
     val year: Int? = null,
     /** Genre names as the site spells them, e.g. "School Life". Empty on the /latest route. */
     val categories: List<String> = emptyList(),
+    /** Other names for the title. The series route carries them; catalogue rows do not. */
+    @SerialName("altTitles") val altTitles: List<String> = emptyList(),
     val likes: Int = 0,
     @SerialName("last_edit") val lastEdit: Long = 0,
     val chapters: List<FlameChapterDto> = emptyList(),

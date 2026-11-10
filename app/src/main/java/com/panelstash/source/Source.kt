@@ -19,7 +19,24 @@ data class SourceManhwa(
      * null rather than guessing from the handful of chapters on a catalogue row.
      */
     val chapterCount: Int? = null,
+    /**
+     * The other names the source itself lists for the title: English titles under a Korean one,
+     * romanisations, and the names other sites use for it. This is what lets the same series be
+     * recognised on two sources that spell it differently, without guessing from word overlap.
+     * Empty on sources that do not publish any.
+     */
+    val aliases: List<String> = emptyList(),
 )
+
+/**
+ * Alternate names as one list per line. The scanlation APIs publish them as a single string, one
+ * title per line, sometimes with a trailing newline and sometimes with blank lines between them.
+ */
+internal fun aliasList(raw: String?): List<String> = raw.orEmpty()
+    .split('\n', '\r')
+    .map { it.trim() }
+    .filter { it.isNotEmpty() }
+    .distinct()
 
 /** A chapter as delivered by a source. */
 data class SourceChapter(

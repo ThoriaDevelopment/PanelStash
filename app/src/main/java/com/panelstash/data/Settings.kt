@@ -109,6 +109,12 @@ data class Preferences(
     val recentSearches: List<String> = emptyList(),
     /** Sources the reader switched off, by id. */
     val disabledSourceIds: Set<String> = emptySet(),
+    /**
+     * A source pinned per title, keyed by the title's comparison form: that source's copy of a
+     * chapter wins even when another source would rank higher. Stored under every name the title
+     * goes by, so opening any of its copies finds the same pin.
+     */
+    val preferredSources: Map<String, String> = emptyMap(),
 )
 
 /**
@@ -159,6 +165,7 @@ class Settings(context: Context) {
             ?.filter { it.isNotBlank() }
             .orEmpty(),
         disabledSourceIds = prefs.getStringSet(KEY_DISABLED_SOURCES, emptySet()).orEmpty(),
+        preferredSources = decodePreferredSources(prefs.getString(KEY_PREFERRED_SOURCES, null)),
     )
 
     private fun quality(key: String, fallback: PageQuality): PageQuality =
@@ -195,6 +202,7 @@ class Settings(context: Context) {
             putStringSet(KEY_FILTER_EXCLUDED, value.browseFilter.excludedTagIds)
             putString(KEY_RECENT_SEARCHES, value.recentSearches.joinToString(SEARCH_SEPARATOR))
             putStringSet(KEY_DISABLED_SOURCES, value.disabledSourceIds)
+            putString(KEY_PREFERRED_SOURCES, encodePreferredSources(value.preferredSources))
         }
     }
 
@@ -217,8 +225,32 @@ class Settings(context: Context) {
         const val KEY_FILTER_EXCLUDED = "filter_excluded"
         const val KEY_RECENT_SEARCHES = "recent_searches"
         const val KEY_DISABLED_SOURCES = "disabled_sources"
+        const val KEY_PREFERRED_SOURCES = "preferred_sources"
 
         /** Unit separator: a search can contain any delimiter a user can type. */
         const val SEARCH_SEPARATOR = "\u001F"
     }
 }
+
+/**
+ * A pinned source per title, written as one `title<unit separator>sourceId` entry per line. The
+ * title is its comparison form (letters and digits only), so it can never contain a newline, and
+ * no source id contains a unit separator.
+ */
+internal fun encodePreferredSources(sources: Map<String, String>): String =
+    sources.entries.joinToString(PREFERRED_ENTRY_SEPARATOR.toString()) { (title, sourceId) ->
+        title + PREFERRED_FIELD_SEPARATOR + sourceId
+    }
+
+/** Reads what [encodePreferredSources] wrote, discarding anything that is not a pair. */
+internal fun decodePreferredSources(raw: String?): Map<String, String> = raw
+    ?.split(PREFERRED_ENTRY_SEPARATOR)
+    ?.mapNotNull { entry ->
+        val at = entry.indexOf(PREFERRED_FIELD_SEPARATOR)
+        if (at <= 0) null else entry.substring(0, at) to entry.substring(at + 1)
+    }
+    ?.toMap()
+    .orEmpty()
+
+private const val PREFERRED_ENTRY_SEPARATOR = '\n'
+private const val PREFERRED_FIELD_SEPARATOR = '\u001F'

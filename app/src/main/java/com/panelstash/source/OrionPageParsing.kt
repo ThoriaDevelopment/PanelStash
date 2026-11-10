@@ -26,6 +26,7 @@ internal data class OrionSeries(
     val status: String?,
     val year: Int?,
     val genres: List<SourceGenre> = emptyList(),
+    val aliases: List<String> = emptyList(),
     val chapters: List<SourceChapter>,
 )
 
@@ -45,9 +46,20 @@ internal fun parseOrionSeries(html: String, seriesSlug: String): OrionSeries {
         status = meta.stringOrNull("seriesStatus"),
         year = meta.stringOrNull("releaseDate")?.let(::yearOf),
         genres = meta.genresOf(),
+        aliases = meta.aliasesOf(),
         chapters = panel.chaptersOf(seriesSlug),
     )
 }
+
+/**
+ * The site publishes a title's other names under `alternativeTitles`. It is a line-separated string
+ * on most pages and a plain list on some, so both are accepted rather than one shape being assumed.
+ */
+private fun JsonObject?.aliasesOf(): List<String> = when (val element = this?.get("alternativeTitles")) {
+    is JsonArray -> element.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+    is JsonPrimitive -> aliasList(element.contentOrNull)
+    else -> emptyList()
+}.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
 
 /** The genres the series page files a title under, as chip-shaped names. */
 private fun JsonObject?.genresOf(): List<SourceGenre> =

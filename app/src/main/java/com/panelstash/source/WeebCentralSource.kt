@@ -183,6 +183,14 @@ private val STATUS_LINK = Regex("""included_status=([A-Za-z]+)""")
 private val RELEASED = Regex("""<strong>Released:\s*</strong>\s*<span>(\d{4})</span>""")
 private val TAG_LINK = Regex("""included_tag=([^"&]+)""")
 
+/** The series page lists the other names the title goes by in its own list. */
+private val ASSOCIATED_NAMES = Regex(
+    """<strong>Associated Name\(s\)</strong>\s*<ul[^>]*>(.*?)</ul>""",
+    RegexOption.DOT_MATCHES_ALL,
+)
+
+private val ASSOCIATED_ITEM = Regex("""<li>\s*([^<]+?)\s*</li>""")
+
 internal fun parseWeebSeries(html: String, remoteId: String): SourceManhwa {
     val title = TITLE.find(html)?.groupValues?.get(1)?.trim()
     // A page without a title is a challenge or a redirect, not a series.
@@ -196,6 +204,15 @@ internal fun parseWeebSeries(html: String, remoteId: String): SourceManhwa {
         .distinct()
         .map { SourceGenre(id = it, name = it) }
         .toList()
+    val aliases = ASSOCIATED_NAMES.find(html)?.groupValues?.get(1)
+        ?.let { block ->
+            ASSOCIATED_ITEM.findAll(block)
+                .map { unescapeHtml(it.groupValues[1]).trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .toList()
+        }
+        .orEmpty()
     return SourceManhwa(
         remoteId = remoteId,
         title = title,
@@ -204,6 +221,7 @@ internal fun parseWeebSeries(html: String, remoteId: String): SourceManhwa {
         year = RELEASED.find(html)?.groupValues?.get(1)?.toIntOrNull(),
         status = STATUS_LINK.find(html)?.groupValues?.get(1),
         genres = genres,
+        aliases = aliases,
     )
 }
 

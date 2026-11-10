@@ -46,6 +46,9 @@ class DownloadStore(
 
     fun observeForManhwa(manhwaId: Long) = dao.observeForManhwa(manhwaId)
 
+    /** Downloads of every source's copy of a title, so a merged chapter list shows them all. */
+    fun observeForManhwas(manhwaIds: List<Long>) = dao.observeForManhwas(manhwaIds)
+
     fun observeAll() = dao.observeAll()
 
     fun observeTotalBytes() = dao.observeTotalBytes()

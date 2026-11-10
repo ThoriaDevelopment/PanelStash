@@ -84,6 +84,8 @@ data class ProfileState(
     val downloads: Map<Long, DownloadEntity>,
     val resumeChapterId: Long?,
     val resumePage: Int,
+    /** The source pinned for this title, or null when the best source per chapter is used. */
+    val preferredSourceId: String? = null,
 )
 
 data class SearchState(
@@ -98,6 +100,11 @@ data class SearchState(
 
 data class ReaderState(
     val manhwa: ManhwaEntity,
+    /**
+     * The copy of the title the reader came from. A chapter merged in from another source saves
+     * its progress here, so one title keeps one "Continue reading" entry in the Library.
+     */
+    val ownerManhwaId: Long,
     val chapter: ChapterEntity,
     val pages: List<ReaderPage>,
     val startPage: Int,

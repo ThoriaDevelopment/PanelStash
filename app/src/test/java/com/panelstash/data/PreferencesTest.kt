@@ -25,4 +25,16 @@ class PreferencesTest {
         assertEquals(ThemeMode.LIGHT, ThemeMode.fromName("LIGHT"))
         assertEquals(ThemeMode.DARK, ThemeMode.fromName(null))
     }
+
+    @Test
+    fun `a pinned source survives a write and a read`() {
+        val pins = mapOf(
+            "sololeveling" to "mangadex",
+            "revengeoftheironbloodedswordhound" to "asurascans",
+        )
+        assertEquals(pins, decodePreferredSources(encodePreferredSources(pins)))
+        assertEquals(emptyMap<String, String>(), decodePreferredSources(null))
+        assertEquals(emptyMap<String, String>(), decodePreferredSources(""))
+        assertEquals(emptyMap<String, String>(), decodePreferredSources("no-separator"))
+    }
 }

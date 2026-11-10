@@ -137,7 +137,7 @@ fun LibraryScreen(vm: AppViewModel) {
                                 ContinueCard(
                                     row = row,
                                     cardWidth = cardWidth,
-                                    onResume = { vm.openChapter(row.chapterId, row.pageIndex) },
+                                    onResume = { vm.openChapter(row.chapterId, row.pageIndex, row.id) },
                                     onDetails = { vm.openProfile(row.id) },
                                 )
                             }
@@ -308,7 +308,7 @@ private fun DownloadsPage(
                             DownloadState.FAILED -> "Download failed"
                             else -> "Downloading…"
                         },
-                        onClick = { vm.openChapter(chapter.chapterId, 0) },
+                        onClick = { vm.openChapter(chapter.chapterId, 0, group.manhwaId) },
                         trailing = {
                             IconButton(
                                 glyph = Glyph.Trash,

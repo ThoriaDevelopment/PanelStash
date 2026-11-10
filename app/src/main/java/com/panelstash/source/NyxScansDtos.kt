@@ -32,6 +32,8 @@ data class NyxPostDto(
     val seriesType: String? = null,
     val seriesStatus: String? = null,
     val isNovel: Boolean = false,
+    /** Other names for the title, one per line. Sent by the detail endpoint only. */
+    val alternativeTitles: String? = null,
     /** The genres the title was filed under; empty on the titles the site never categorised. */
     val genres: List<NyxGenreDto> = emptyList(),
     val chapters: List<NyxChapterDto> = emptyList(),

@@ -43,6 +43,8 @@ data class AsuraSeriesDto(
     @SerialName("chapter_count") val chapterCount: Int = 0,
     /** Filed under these on the catalogue rows as well as the detail, so both carry them. */
     val genres: List<AsuraGenreDto> = emptyList(),
+    /** Other names for the series, in every language the site lists. Same series, other sites. */
+    @SerialName("alt_titles") val altTitles: List<String> = emptyList(),
 )
 
 @Serializable

@@ -18,6 +18,8 @@ import com.panelstash.data.db.ContinueRow
 import com.panelstash.data.db.DownloadState
 import com.panelstash.data.db.FollowRow
 import com.panelstash.data.db.ManhwaEntity
+import com.panelstash.data.mergeChapters
+import com.panelstash.data.normaliseTitle
 import com.panelstash.source.BrowseFilter
 import com.panelstash.source.BrowseSort
 import com.panelstash.source.PageQuality
@@ -27,6 +29,7 @@ import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
 import com.panelstash.update.UpdateState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +37,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -56,6 +61,9 @@ private const val PROGRESS_WRITE_DELAY_MS = 600L
 /** A stored chapter list older than this is refreshed when its profile is opened. */
 private const val CHAPTER_REFRESH_MS = 6 * 60 * 60 * 1000L
 
+/** The other sources carrying an opened title are looked for again after this long. */
+private const val LINK_REFRESH_MS = 10 * 60 * 1000L
+
 /** Taller pages skip prefetching; they decode slowly and would crowd the memory cache. */
 private const val MAX_PREFETCH_HEIGHT = 8_192
 
@@ -72,6 +80,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as PanelStashApp).container
     private val library = container.library
     private val settings = container.settings
+
+    /**
+     * The other sources' copies of a title, keyed by the profile that was opened. A profile's
+     * chapter list is the union of these, so a chapter only some source carries is still there.
+     */
+    private val linked = MutableStateFlow<Map<Long, List<Long>>>(emptyMap())
+    private val linkJobs = mutableMapOf<Long, Job>()
+    private val linkedAt = mutableMapOf<Long, Long>()
 
     private val stack = MutableStateFlow<List<Screen>>(listOf(Screen.Browse))
     val screen: StateFlow<Screen> = stack
@@ -597,11 +613,56 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
+     * From a chapter to the profile of the series it belongs to. The reader is left behind rather
+     * than buried under the profile: the profile is where reading stopped, and going back from it
+     * lands where the reader was opened from.
+     */
+    /**
+     * Pins a source for this title, or clears the pin when [sourceId] is null. The pin is stored
+     * under every name the title goes by, because each copy of it is opened separately and has to
+     * arrive at the same answer.
+     */
+    fun setPreferredSource(manhwaId: Long, sourceId: String?) {
+        viewModelScope.launch {
+            val manhwa = library.manhwa(manhwaId) ?: return@launch
+            val names = buildList {
+                add(manhwa.title)
+                for (id in groupOf(manhwaId)) library.manhwa(id)?.title?.let(::add)
+            }.map(::normaliseTitle).filter { it.isNotBlank() }.distinct()
+            settings.update { prefs ->
+                val next = prefs.preferredSources.toMutableMap()
+                if (sourceId == null) {
+                    names.forEach(next::remove)
+                } else {
+                    names.forEach { next[it] = sourceId }
+                }
+                prefs.copy(preferredSources = next)
+            }
+            _message.value = if (sourceId == null) {
+                "Using all sources"
+            } else {
+                "${library.source(sourceId)?.name ?: sourceId} first"
+            }
+        }
+    }
+
+    fun openSeriesFromReader(manhwaId: Long) {
+        val below = stack.value.dropLast(1).lastOrNull()
+        if (below is Screen.Profile && below.manhwaId == manhwaId) {
+            back()
+        } else {
+            replaceTop(Screen.Profile(manhwaId))
+        }
+        ensureChapters(manhwaId)
+    }
+
+    /**
      * Loads the chapter list the first time a manhwa is opened, and records why it failed so the
      * profile can show it instead of an empty list. A list that is already stored but old is
      * refreshed quietly, so a followed title eventually shows its new chapters.
      */
     fun ensureChapters(manhwaId: Long) {
+        linkSources(manhwaId)
         if (!chaptersInFlight.add(manhwaId)) return
         viewModelScope.launch {
             try {
@@ -631,6 +692,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshChapters(manhwaId: Long) {
+        linkSources(manhwaId, force = true)
         if (!chaptersInFlight.add(manhwaId)) return
         _chapterLoad.value = ChapterLoad(manhwaId, loading = true)
         viewModelScope.launch {
@@ -664,7 +726,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         matchJob = viewModelScope.launch {
             try {
                 val manhwa = container.db.manhwaDao().byId(manhwaId) ?: return@launch
-                if (library.chaptersFor(manhwaId).any { it.externalUrl == null }) return@launch
+                // Linking runs alongside the chapter sync. Waiting for it means a title MangaDex
+                // only keeps an empty copy of is not switched away from when another source
+                // turns out to carry readable chapters of it.
+                linkJobs[manhwaId]?.join()
+                if (library.hasReadableChapter(groupOf(manhwaId))) return@launch
                 // The search runs over every other source, which takes a moment; the profile says
                 // so rather than claiming, in the meantime, that nothing anywhere has the title.
                 _chapterLoad.value = ChapterLoad(manhwaId, matching = true)
@@ -690,22 +756,93 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** The title's copies: the one the reader opened, then whichever sources it was linked to. */
+    private fun groupOf(manhwaId: Long): List<Long> =
+        listOf(manhwaId) + linked.value[manhwaId].orEmpty()
+
+    /** The source pinned for a title, looked up by the name this copy goes by. */
+    private fun preferredSource(title: String?, prefs: Preferences = settings.current): String? =
+        title?.let { prefs.preferredSources[normaliseTitle(it)] }
+
+    /**
+     * Chapter precedence: the pinned source first when there is one, then the app's own order.
+     * A chapter the pinned source does not carry still comes from whichever source has it.
+     */
+    private fun rankFor(preferred: String?): (String) -> Int =
+        if (preferred == null) library::sourceRank else { id -> if (id == preferred) -1 else library.sourceRank(id) }
+
+    private suspend fun rankForTitle(manhwaId: Long): (String) -> Int =
+        rankFor(preferredSource(library.manhwa(manhwaId)?.title))
+
+    /**
+     * A profile is one title, not one source. Every copy of the title it was linked to is read
+     * at once and [mergeChapters] keeps one entry per chapter number, so a series whose first
+     * chapters only exist on one source and whose later ones only exist on another reads whole.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
     fun profile(manhwaId: Long): Flow<ProfileState?> = combine(
         library.observeManhwa(manhwaId),
-        library.observeChapters(manhwaId),
-        container.downloads.observeForManhwa(manhwaId),
-        container.db.resumeDao().observePoint(manhwaId),
-    ) { manhwa, chapters, downloads, resume ->
-        if (manhwa == null) {
-            null
-        } else {
-            ProfileState(
-                manhwa = manhwa,
-                chapters = chapters,
-                downloads = downloads.associateBy { it.chapterId },
-                resumeChapterId = resume?.chapterId,
-                resumePage = resume?.pageIndex ?: 0,
-            )
+        linked.map { it[manhwaId].orEmpty() },
+        preferences,
+    ) { manhwa, others, prefs -> Triple(manhwa, others, prefs) }
+        .flatMapLatest { (manhwa, others, prefs) ->
+            if (manhwa == null) {
+                flowOf(null)
+            } else {
+                val group = listOf(manhwaId) + others
+                val preferred = preferredSource(manhwa.title, prefs)
+                combine(
+                    library.observeChaptersFor(group),
+                    container.downloads.observeForManhwas(group),
+                    container.db.resumeDao().observePoint(manhwaId),
+                ) { chapters, downloads, resume ->
+                    ProfileState(
+                        manhwa = manhwa,
+                        chapters = mergeChapters(chapters, rankFor(preferred)),
+                        downloads = downloads.associateBy { it.chapterId },
+                        resumeChapterId = resume?.chapterId,
+                        resumePage = resume?.pageIndex ?: 0,
+                        preferredSourceId = preferred,
+                    )
+                }
+            }
+        }
+
+    /**
+     * Finds the same title on the other installed sources and keeps the copies that exist. Each
+     * is stored like any opened title, so its chapters can be read and downloaded, but the
+     * profile shows one merged list rather than making the reader pick a source up front.
+     *
+     * The result is cached for a while: reopening a title must not cost one search per source
+     * every time. A refresh forces it, which is how a new source, or a new chapter on a sibling,
+     * gets picked up.
+     */
+    private fun linkSources(manhwaId: Long, force: Boolean = false) {
+        if (linkJobs[manhwaId]?.isActive == true) return
+        if (!force && System.currentTimeMillis() - (linkedAt[manhwaId] ?: 0) < LINK_REFRESH_MS) return
+        linkJobs[manhwaId] = viewModelScope.launch {
+            try {
+                val manhwa = container.db.manhwaDao().byId(manhwaId) ?: return@launch
+                // The names this source publishes for the title, alternates included: two sites
+                // that call the same series different things are still one series.
+                val anchor = runCatching {
+                    library.source(manhwa.sourceId)?.manhwa(manhwa.remoteId)
+                }.getOrNull()
+                val names = listOf(manhwa.title) + anchor?.aliases.orEmpty()
+                val matches = runCatching {
+                    library.findEverywhere(names, excluding = setOf(manhwa.sourceId))
+                }.getOrNull().orEmpty()
+                val ids = mutableListOf<Long>()
+                for ((source, target) in matches) {
+                    val id = runCatching { library.openManhwa(source.id, target.remoteId) }
+                        .getOrNull() ?: continue
+                    if (id != manhwaId && id !in ids) ids += id
+                }
+                linkedAt[manhwaId] = System.currentTimeMillis()
+                linked.value = linked.value + (manhwaId to ids)
+            } finally {
+                linkJobs.remove(manhwaId)
+            }
         }
     }
 
@@ -845,17 +982,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- reader -----------------------------------------------------------
 
-    /** The chapter list of whatever the reader has open, for switching without leaving it. */
-    fun chapters(manhwaId: Long): Flow<List<ChapterEntity>> = library.observeChapters(manhwaId)
+    /**
+     * The chapter list of whatever the reader has open, for switching without leaving it. It is
+     * the merged list when the title also exists on another source, so the next chapter of a
+     * series that stops publishing here is still openable from inside the reader.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun chapters(manhwaId: Long): Flow<List<ChapterEntity>> = combine(
+        linked.map { it[manhwaId].orEmpty() },
+        preferences,
+    ) { others, prefs -> others to prefs }
+        .flatMapLatest { (others, prefs) ->
+            val preferred = preferredSource(library.manhwa(manhwaId)?.title, prefs)
+            library.observeChaptersFor(listOf(manhwaId) + others)
+                .map { mergeChapters(it, rankFor(preferred)) }
+        }
 
-    /** Replaces the open chapter with another one from the same manhwa. */
-    fun switchChapter(chapterId: Long) {
+    /** Replaces the open chapter with another one from the same title. */
+    fun switchChapter(chapterId: Long, ownerManhwaId: Long) {
         if (_reader.value?.chapter?.id == chapterId) return
         stack.value = stack.value.dropLast(1)
-        openChapter(chapterId, 0)
+        openChapter(chapterId, 0, ownerManhwaId)
     }
 
-    fun openChapter(chapterId: Long, pageIndex: Int = 0) {
+    /**
+     * Opens a chapter. [ownerManhwaId] is the copy of the title the reader navigated from: a
+     * chapter merged in from another source still saves its progress there, so the Library keeps
+     * one "Continue reading" entry per title instead of one per source.
+     */
+    fun openChapter(chapterId: Long, pageIndex: Int = 0, ownerManhwaId: Long? = null) {
         push(Screen.Reader(chapterId))
         readerJob?.cancel()
         readerJob = viewModelScope.launch {
@@ -868,7 +1023,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 back()
                 return@launch
             }
-            val saved = library.resume(manhwa.id)
+            val owner = ownerManhwaId ?: manhwa.id
+            val saved = library.resume(owner)
             val start = when {
                 pageIndex > 0 -> pageIndex
                 saved?.chapterId == chapter.id -> saved.pageIndex
@@ -883,10 +1039,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     val resolved = start.coerceIn(0, maxOf(0, pages.size - 1))
                     _reader.value = ReaderState(
                         manhwa = manhwa,
+                        ownerManhwaId = owner,
                         chapter = fresh,
                         pages = pages,
                         startPage = resolved,
-                        nextChapterId = library.nextChapter(manhwa.id, chapter.id)?.id,
+                        nextChapterId = library
+                            .nextChapterIn(groupOf(owner), chapter.id, rankForTitle(owner))?.id,
                     )
                     prefetch(pages, resolved)
                 }
@@ -976,15 +1134,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val state = _reader.value?.takeIf { it.chapter.id == chapterId } ?: return
         advanceJob = viewModelScope.launch {
             library.markRead(chapterId, read = true)
-            val next = library.nextChapter(state.manhwa.id, chapterId)
+            // The next chapter is looked up in the merged list, so a series that continues on
+            // another source keeps going instead of reporting the end of the series.
+            val owner = state.ownerManhwaId
+            val next = library.nextChapterIn(groupOf(owner), chapterId, rankForTitle(owner))
             if (next == null) {
                 _message.value = "You are all caught up"
                 stack.value = stack.value.dropLast(1)
                 _reader.value = null
             } else {
-                library.saveResume(state.manhwa.id, next.id, 0)
+                library.saveResume(owner, next.id, 0)
                 stack.value = stack.value.dropLast(1)
-                openChapter(next.id, 0)
+                openChapter(next.id, 0, owner)
             }
         }
     }

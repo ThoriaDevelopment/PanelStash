@@ -230,7 +230,7 @@ fun ReaderScreen(vm: AppViewModel) {
             // One page is several bands, so the list position is a band, not a page number.
             val index = liveSlots.pageOf.getOrElse(slot) { current.pages.lastIndex.coerceAtLeast(0) }
             if (index <= current.pages.lastIndex) {
-                vm.saveProgress(current.manhwa.id, current.chapter.id, index)
+                vm.saveProgress(current.ownerManhwaId, current.chapter.id, index)
                 // Keep the next few pages warm as the reader moves down the chapter, so a fast
                 // scroll or a tap never waits on the network for a page that is about to appear.
                 vm.prefetch(current.pages, index)
@@ -446,6 +446,7 @@ fun ReaderScreen(vm: AppViewModel) {
                 title = current.manhwa.title,
                 chapter = current.chapter.numberText,
                 onBack = { vm.back() },
+                onSeries = { vm.openSeriesFromReader(current.ownerManhwaId) },
             )
         }
 
@@ -466,7 +467,9 @@ fun ReaderScreen(vm: AppViewModel) {
         }
 
         if (showChapters) {
-            val chapters by remember(current.manhwa.id) { vm.chapters(current.manhwa.id) }
+            // The sheet lists the title, not the source: chapters merged in from another copy are
+            // listed too, keyed by the profile the reader was opened from.
+            val chapters by remember(current.ownerManhwaId) { vm.chapters(current.ownerManhwaId) }
                 .collectAsState(initial = emptyList())
             Sheet(
                 visible = showChapters,
@@ -486,7 +489,7 @@ fun ReaderScreen(vm: AppViewModel) {
                             subtitle = chapter.title,
                             onClick = {
                                 showChapters = false
-                                vm.switchChapter(chapter.id)
+                                vm.switchChapter(chapter.id, current.ownerManhwaId)
                             },
                             trailing = {
                                 if (here) Eyebrow("READING", color = Palette.Accent)
@@ -675,7 +678,12 @@ internal fun pageBandCount(
 }
 
 @Composable
-private fun ReaderTopBar(title: String, chapter: String, onBack: () -> Unit) {
+private fun ReaderTopBar(
+    title: String,
+    chapter: String,
+    onBack: () -> Unit,
+    onSeries: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -696,6 +704,13 @@ private fun ReaderTopBar(title: String, chapter: String, onBack: () -> Unit) {
             )
             Eyebrow("CHAPTER $chapter", color = Palette.ReaderInkSecondary)
         }
+        IconButton(
+            glyph = Glyph.Books,
+            onClick = onSeries,
+            strong = true,
+            tint = Palette.ReaderInk,
+            label = "Open the series profile",
+        )
     }
 }
 

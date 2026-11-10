@@ -91,6 +91,7 @@ class OrionScansSource(
             year = series.year,
             status = series.status,
             genres = series.genres,
+            aliases = series.aliases,
         )
     }
 

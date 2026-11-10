@@ -159,6 +159,26 @@ interface ChapterDao {
     )
     fun observeForManhwa(manhwaId: Long): Flow<List<ChapterEntity>>
 
+    /**
+     * Every stored chapter of several sources' copies of the same title, as one profile shows
+     * them. Collapsing the duplicates is the repository's job, not the query's.
+     */
+    @Query(
+        """
+        SELECT * FROM chapter WHERE manhwaId IN (:manhwaIds)
+        ORDER BY CASE WHEN sortKey IS NULL THEN 1 ELSE 0 END, sortKey ASC, numberText ASC
+        """,
+    )
+    fun observeForManhwas(manhwaIds: List<Long>): Flow<List<ChapterEntity>>
+
+    @Query(
+        """
+        SELECT * FROM chapter WHERE manhwaId IN (:manhwaIds)
+        ORDER BY CASE WHEN sortKey IS NULL THEN 1 ELSE 0 END, sortKey ASC, numberText ASC
+        """,
+    )
+    suspend fun listForManhwas(manhwaIds: List<Long>): List<ChapterEntity>
+
     @Query(
         """
         SELECT * FROM chapter WHERE manhwaId = :manhwaId
@@ -255,6 +275,10 @@ interface DownloadDao {
 
     @Query("SELECT * FROM download WHERE manhwaId = :manhwaId")
     fun observeForManhwa(manhwaId: Long): Flow<List<DownloadEntity>>
+
+    /** Downloads of every source's copy of one title, for the merged chapter list. */
+    @Query("SELECT * FROM download WHERE manhwaId IN (:manhwaIds)")
+    fun observeForManhwas(manhwaIds: List<Long>): Flow<List<DownloadEntity>>
 
     @Query("DELETE FROM download WHERE chapterId = :chapterId")
     suspend fun delete(chapterId: Long)

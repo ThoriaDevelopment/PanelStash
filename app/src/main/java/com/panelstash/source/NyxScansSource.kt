@@ -195,6 +195,8 @@ internal fun NyxPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
         val name = genre.name.trim()
         if (name.isBlank() || genre.id == 0) null else SourceGenre(genre.id.toString(), name)
     },
+    // The detail endpoint carries the title's other names; catalogue rows do not.
+    aliases = aliasList(alternativeTitles),
 )
 
 internal fun NyxChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {

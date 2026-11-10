@@ -20,6 +20,13 @@ internal fun MangaDto.toSourceManhwa(): SourceManhwa {
         year = attributes.year,
         status = attributes.status,
         genres = sourceGenres(),
+        // Every spelling MangaDex lists, in every language: this is what lets the same series be
+        // matched to a source that titles it differently.
+        aliases = attributes.altTitles
+            .flatMap { it.values }
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct(),
     )
 }
 

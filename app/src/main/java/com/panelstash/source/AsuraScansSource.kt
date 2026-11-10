@@ -188,6 +188,9 @@ internal fun AsuraSeriesDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
         genre.name.takeIf { it.isNotBlank() }?.let { SourceGenre(id = id, name = it.trim()) }
     },
     chapterCount = chapterCount.takeIf { it > 0 },
+    // The site keeps every translated name and the names other sites use in one list, which is
+    // what makes a copy under a different title recognisable as the same series.
+    aliases = altTitles.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
 )
 
 internal fun AsuraChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {

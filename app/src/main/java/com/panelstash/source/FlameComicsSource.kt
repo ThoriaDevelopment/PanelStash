@@ -301,6 +301,8 @@ internal fun FlameSeriesDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
         .filter { it.isNotEmpty() }
         .distinct()
         .map { SourceGenre(id = it, name = it) },
+    // Published on the series route only, which is what opening a title reads.
+    aliases = altTitles.map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
 )
 
 /**
