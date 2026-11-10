@@ -20,7 +20,8 @@ import java.io.IOException
  *
  * Provenance:
  *
- *   GET /browse-comics/data/?page=&sort=&genre_included=   catalogue cards, as an HTML fragment
+ *   GET /browse-comics/data/?page=&sort=&include_genres=&exclude_genres=&status=
+ *                                       catalogue cards, as an HTML fragment
  *   GET /search/?search=                                    search results, one page
  *   GET /manga/{slug}                                       detail, status, genres, aliases
  *   GET /manga/{slug}/all-chapters/                         every chapter in one document
@@ -45,6 +46,9 @@ class MgekoSource(
         sorts = setOf(BrowseSort.LATEST, BrowseSort.POPULAR),
         genres = true,
         titleGenres = true,
+        // The route takes status and excluded genres as query parameters of its own.
+        status = true,
+        excludedGenres = true,
     )
 
     /** Politeness: pages are a few hundred KB of markup. */
@@ -68,7 +72,12 @@ class MgekoSource(
             parameter("page", page)
             // Top rated is not offered here; newest is the sane order if it arrives anyway.
             parameter("sort", if (sort == BrowseSort.POPULAR) "trending" else "recently_added")
-            tagId?.takeIf { it.isNotBlank() }?.let { parameter("genre_included", it) }
+            // The route reads the plural list form. `genre_included`, the name the site's own
+            // detail links carry, is only understood by the browse page, which rewrites it.
+            tagId?.takeIf { it.isNotBlank() }?.let { parameter("include_genres", it) }
+            filter.excludedTagIds.takeIf { it.isNotEmpty() }
+                ?.let { parameter("exclude_genres", it.joinToString(",")) }
+            mgekoStatus(filter.status)?.let { parameter("status", it) }
         }
         val response = try {
             Network.json.decodeFromString<MgekoBrowseResponse>(body)
@@ -150,6 +159,16 @@ class MgekoSource(
         /** Cards the browse grid lists per page. */
         const val BROWSE_PAGE = 24
     }
+}
+
+private fun mgekoStatus(status: StatusFilter): String? = when (status) {
+    StatusFilter.ANY -> null
+    StatusFilter.ONGOING -> "ongoing"
+    StatusFilter.COMPLETED -> "completed"
+    StatusFilter.HIATUS -> "hiatus"
+    // The site has no cancelled status; an unknown value answers an empty catalogue, which is
+    // closer to the truth than quietly showing everything.
+    StatusFilter.CANCELLED -> "cancelled"
 }
 
 internal const val MGEKO_BASE = "https://www.mgeko.cc"

@@ -19,8 +19,10 @@ import java.io.IOException
  *
  * Provenance:
  *
- *   GET /page/{n}/                     newest catalogue, ten posters a page
- *   GET /genres/{slug}/page/{n}/       one genre, the only filter the site honours
+ *   GET /page/{n}/                     newest catalogue, forty posters a page
+ *   GET /genres/{slug}/page/{n}/       one genre, ten a page
+ *   GET /manga/?status=&genre[0]=&page= the filtered archive, twenty a page, and the one
+ *                                       listing that takes a status
  *   GET /?s={query}                    search (one page; the theme answers paging with 404)
  *   GET /manga/{slug}/                 detail, genres and the whole chapter list
  *   GET /{chapterPath}/                reader page, pages as plain image tags
@@ -43,6 +45,9 @@ class ArenaScansSource(
         sorts = setOf(BrowseSort.LATEST),
         genres = true,
         titleGenres = true,
+        // Only the archive takes one, and it is barely used: the site files almost every title as
+        // ongoing, so "completed" is a handful of series rather than a working filter.
+        status = true,
     )
 
     /** Politeness: a detail page is a few hundred KB of markup. */
@@ -50,6 +55,9 @@ class ArenaScansSource(
 
     @Volatile
     private var cachedGenres: List<SourceGenre>? = null
+
+    @Volatile
+    private var cachedTermIds: Map<String, Int>? = null
 
     override suspend fun browse(
         sort: BrowseSort,
@@ -59,8 +67,11 @@ class ArenaScansSource(
         limit: Int,
     ): List<SourceManhwa> {
         val tag = tagId?.takeIf { it.isNotBlank() }
-        // The site's own page size, not the caller's: the archive carries 40 rows a page and a
-        // genre 10, so offsets are mapped to that grid and the remainder is dropped here.
+        // The latest grid and the genre pages are fixed listings that ignore the query, so a
+        // status sends the request to the one page that answers it.
+        arenaStatus(filter.status)?.let { return browseArchive(it, tag, offset, limit) }
+        // The site's own page size, not the caller's: the latest grid carries 40 rows a page and
+        // a genre 10, so offsets are mapped to that grid and the remainder is dropped here.
         val pageSize = if (tag == null) ARCHIVE_PAGE else GENRE_PAGE
         val page = offset / pageSize + 1
         val skip = offset % pageSize
@@ -73,6 +84,43 @@ class ArenaScansSource(
         val body = request(path)
         val rows = parseArenaCatalogue(if (tag == null) arenaLatestSection(body) else body)
         return rows.drop(skip).take(limit)
+    }
+
+    /**
+     * The filtered archive, twenty rows a page. It is also the only listing that can say "one
+     * genre, ongoing": the genre pages drop the status and the archive drops a genre slug.
+     */
+    private suspend fun browseArchive(
+        status: String,
+        tag: String?,
+        offset: Int,
+        limit: Int,
+    ): List<SourceManhwa> {
+        val page = offset / FILTERED_PAGE + 1
+        val skip = offset % FILTERED_PAGE
+        val termId = tag?.let { arenaTermId(it) }
+        val body = request("/manga/") {
+            html()
+            parameter("status", status)
+            parameter("page", page)
+            termId?.let { parameter("genre[0]", it) }
+        }
+        return parseArenaCatalogue(body).drop(skip).take(limit)
+    }
+
+    /**
+     * The archive takes a genre as a term id while the rest of the site, and so this source, names
+     * genres by slug. Its filter form pairs every id with a name, so a slug becomes a name and the
+     * name an id. Read once: the taxonomy is fixed and the form only lives on one page.
+     */
+    private suspend fun arenaTermId(slug: String): Int? {
+        val name = genres().firstOrNull { it.id == slug }?.name ?: return null
+        val terms = cachedTermIds ?: run {
+            val parsed = parseArenaGenreTerms(request("/manga/"))
+            if (parsed.isNotEmpty()) cachedTermIds = parsed
+            parsed
+        }
+        return terms[name]
     }
 
     override suspend fun search(query: String, offset: Int, limit: Int): List<SourceManhwa> {
@@ -147,7 +195,19 @@ class ArenaScansSource(
 
         /** Rows a genre page lists. */
         const val GENRE_PAGE = 10
+
+        /** Rows the filtered archive lists. */
+        const val FILTERED_PAGE = 20
     }
+}
+
+private fun arenaStatus(status: StatusFilter): String? = when (status) {
+    StatusFilter.ANY -> null
+    StatusFilter.ONGOING -> "ongoing"
+    StatusFilter.COMPLETED -> "completed"
+    StatusFilter.HIATUS -> "hiatus"
+    // No value of its own; an unknown one answers an empty catalogue, which is the truth here.
+    StatusFilter.CANCELLED -> "cancelled"
 }
 
 internal const val ARENA_BASE = "https://arenascan.com"
@@ -278,6 +338,24 @@ internal fun parseArenaPages(html: String): List<PageImage> =
         .distinct()
         .mapIndexed { index, url -> PageImage(index = index, url = url) }
         .toList()
+
+/**
+ * Genre names as the archive's filter form spells them, each with the id its genre page answers
+ * to. A few names are filed twice, by an import and by the theme's own defaults; WordPress gives
+ * the plain slug to the term created first, so the lowest id is the one `/genres/{slug}/` lists.
+ */
+private val ARENA_TERM = Regex("""id="genre-(\d+)"[^>]*>\s*<label for="genre-\d+">([^<]+)</label>""")
+
+internal fun parseArenaGenreTerms(html: String): Map<String, Int> {
+    val terms = LinkedHashMap<String, Int>()
+    for (row in ARENA_TERM.findAll(html)) {
+        val id = row.groupValues[1].toIntOrNull() ?: continue
+        val name = unescapeHtml(row.groupValues[2]).trim()
+        if (name.isEmpty()) continue
+        terms[name] = minOf(terms[name] ?: id, id)
+    }
+    return terms
+}
 
 internal fun parseArenaGenres(html: String): List<SourceGenre> =
     ARENA_GENRE.findAll(html)

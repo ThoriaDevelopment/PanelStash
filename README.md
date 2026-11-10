@@ -50,6 +50,7 @@ Finding something to read:
 
 - Every source that publishes genres now hands them over, so a manhwa page lists what the title is filed under and recommendations can match on it.
 - Browse by genre on the sources that can filter by one: MangaDex, Flame, Kayn, Asura, Arena and Mgeko.
+- Narrow by status on MangaDex, Flame, Kayn, Nyx, Orion, Vortex, Arena and Mgeko, and by excluded genres on MangaDex, Flame and Mgeko.
 - Above the Browse grid: a merged top ten, a "More in <genre>" row drawn from the genres you read most, and a "Because you read" row per recent title. The genre row carries a chip that opens Browse filtered to that genre.
 - When two sources carry the same title, the copy with more chapters wins, so a licensed entry with a handful of chapters cannot stand in for a scanlation with hundreds.
 - Chapters a site only links to and cannot serve are left out. Everything a manhwa page lists opens in the reader.
@@ -83,9 +84,9 @@ Look:
 - Flame Comics: mostly manhwa, newest chapters free.
 - Weeb Central: big catalogue, and the chapter list arrives whole, so a 200 chapter run is one request.
 - Mangapill: large catalogue with its own genre filter, so Browse can be narrowed there without leaving the app.
-- Arena Scans: big WordPress catalogue with complete chapter lists and a full HTML reader.
+- Arena Scans: big WordPress catalogue with complete chapter lists and a full HTML reader. Its status filter only shows what the site files, which is nearly all ongoing.
 - Lua Comic: curated manhwa catalogue. The newest chapters are coin-locked and show as unreadable.
-- Mgeko: large aggregator with plain readers and a broad manhwa catalogue.
+- Mgeko: large aggregator with plain readers, a broad manhwa catalogue, and genre, excluded-genre and status filters that work.
 
 MangaDex is the only source with a documented API, and Lua Comic serves a JSON API of its own. The other ten are scanlation sites that the app reads through the same endpoints and pages their own front ends use, so their payloads can change without warning. All twelve sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter. Browse and search can also run across every source at once.
 

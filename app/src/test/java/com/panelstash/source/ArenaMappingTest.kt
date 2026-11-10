@@ -125,6 +125,31 @@ class ArenaMappingTest {
         assertEquals("https://cdn.arenascan.com/arena-bucket/320761/425/38734b90fe05.webp", pages.last().url)
     }
 
+    /** The archive's genre filter, cut from /manga/ on 2026-11-10. */
+    private val filterForm = """
+        <form action="https://arenascan.com/manga/" class="filters " method="GET">
+            <div class="filter dropdown">
+                <input class="genre-item " type="checkbox" id="genre-74" name="genre[]" value="74">
+                <label for="genre-74">Action</label>
+                <input class="genre-item " type="checkbox" id="genre-31" name="genre[]" value="31">
+                <label for="genre-31">Action</label>
+                <input class="genre-item " type="checkbox" id="genre-5269" name="genre[]" value="5269">
+                <label for="genre-5269">Zombies</label>
+            </div>
+        </form>
+    """.trimIndent()
+
+    @Test
+    fun `a genre maps to the term its own page lists, not to the duplicate name`() {
+        val terms = parseArenaGenreTerms(filterForm)
+
+        assertEquals(2, terms.size)
+        // Two terms are filed as Action. The plain slug belongs to the older one, which is the
+        // term /genres/action/ lists, and that is the lower id.
+        assertEquals(31, terms["Action"])
+        assertEquals(5269, terms["Zombies"])
+    }
+
     @Test
     fun `a detail page with no title is treated as unavailable`() {
         val error = runCatching { parseArenaSeries("<html><body>Just a moment...</body></html>", "x") }.exceptionOrNull()
