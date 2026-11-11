@@ -224,18 +224,22 @@ internal fun parseMangaPillSeries(html: String, remoteId: String): SourceManhwa 
     )
 }
 
-private val CHAPTER_LINK = Regex("""<a[^>]+href="/chapters/([^"]+)"[^>]*>\s*(Chapter[^<]*)</a>""")
-private val CHAPTER_NUMBER = Regex("""Chapter\s+([0-9][0-9.]*)""")
+private val CHAPTER_LINK = Regex("""<a[^>]+href="/chapters/([^"]+)"[^>]*>""")
 
 internal fun parseMangaPillChapters(html: String): List<SourceChapter> {
     val chapters = mutableListOf<SourceChapter>()
     for (link in CHAPTER_LINK.findAll(html)) {
         val path = link.groupValues[1]
-        val number = CHAPTER_NUMBER.find(link.groupValues[2])?.groupValues?.get(1) ?: continue
+        // The label is the anchor's own text, which is a number on most rows and the chapter's
+        // own name ("Prologue", "Side Story 2") on the rest.
+        val text = html.substring(link.range.last + 1, minOf(html.length, link.range.last + 200))
+            .substringBefore("</a>")
+            .replace(Regex("""<[^>]+>"""), " ")
+        val label = chapterLabel(text) ?: chapterLabel(path.replace('-', ' ')) ?: continue
         chapters += SourceChapter(
             remoteId = path,
-            numberText = number,
-            sortKey = chapterSortKey(number),
+            numberText = label.numberText,
+            sortKey = label.sortKey,
             title = null,
             language = "en",
             pageCount = 0,

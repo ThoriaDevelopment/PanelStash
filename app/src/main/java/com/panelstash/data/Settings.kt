@@ -2,6 +2,7 @@ package com.panelstash.data
 
 import android.content.Context
 import androidx.core.content.edit
+import com.panelstash.source.ALL_SOURCES
 import com.panelstash.source.BrowseFilter
 import com.panelstash.source.PageQuality
 import com.panelstash.source.StatusFilter
@@ -101,7 +102,11 @@ data class Preferences(
     val downloadQuality: PageQuality = PageQuality.ORIGINAL,
     /** When false, downloads are allowed to start on mobile data without asking. */
     val unmeteredOnly: Boolean = true,
-    val defaultSourceId: String = "mangadex",
+    /**
+     * Where Browse opens. [ALL_SOURCES] is the default, so the first screen is the whole
+     * catalogue rather than one site's slice of it.
+     */
+    val defaultSourceId: String = ALL_SOURCES,
     /** Chapter lists read newest-first when true. */
     val reverseChapters: Boolean = false,
     val browseFilter: BrowseFilter = BrowseFilter.None,
@@ -157,7 +162,9 @@ class Settings(context: Context) {
         streamingQuality = quality(KEY_STREAMING_QUALITY, PageQuality.DATA_SAVER),
         downloadQuality = quality(KEY_DOWNLOAD_QUALITY, PageQuality.ORIGINAL),
         unmeteredOnly = prefs.getBoolean(KEY_UNMETERED_ONLY, true),
-        defaultSourceId = prefs.getString(KEY_DEFAULT_SOURCE, "mangadex") ?: "mangadex",
+        // A fresh key: the old one was written by every settings change, so installs that never
+        // chose a source were pinned to MangaDex. The old value is left untouched and ignored.
+        defaultSourceId = prefs.getString(KEY_BROWSE_SOURCE, ALL_SOURCES) ?: ALL_SOURCES,
         reverseChapters = prefs.getBoolean(KEY_REVERSE_CHAPTERS, false),
         browseFilter = readFilter(),
         recentSearches = prefs.getString(KEY_RECENT_SEARCHES, null)
@@ -194,7 +201,7 @@ class Settings(context: Context) {
             putString(KEY_STREAMING_QUALITY, value.streamingQuality.name)
             putString(KEY_DOWNLOAD_QUALITY, value.downloadQuality.name)
             putBoolean(KEY_UNMETERED_ONLY, value.unmeteredOnly)
-            putString(KEY_DEFAULT_SOURCE, value.defaultSourceId)
+            putString(KEY_BROWSE_SOURCE, value.defaultSourceId)
             putBoolean(KEY_REVERSE_CHAPTERS, value.reverseChapters)
             putString(KEY_FILTER_STATUS, value.browseFilter.status.name)
             putInt(KEY_FILTER_YEAR, value.browseFilter.year ?: 0)
@@ -217,7 +224,7 @@ class Settings(context: Context) {
         const val KEY_TAP_SCROLL = "tap_scroll"
         const val KEY_KEEP_AWAKE = "keep_awake"
         const val KEY_UNMETERED_ONLY = "unmetered_only"
-        const val KEY_DEFAULT_SOURCE = "default_source"
+        const val KEY_BROWSE_SOURCE = "browse_source"
         const val KEY_REVERSE_CHAPTERS = "reverse_chapters"
         const val KEY_FILTER_STATUS = "filter_status"
         const val KEY_FILTER_YEAR = "filter_year"

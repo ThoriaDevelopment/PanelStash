@@ -303,13 +303,16 @@ internal fun parseMgekoChapters(html: String): List<SourceChapter> {
     for (link in MGEKO_CHAPTER_LINK.findAll(html)) {
         val path = link.groupValues[1].trim('/')
         if (path.isEmpty() || path in chapters) continue
-        val number = MGEKO_CHAPTER_NUMBER.find(path)?.groupValues?.get(1)
-            ?.replace('-', '.')
+        // The chapter's own path is the label when the site does not number it, so a prologue
+        // (`...-prologue-eng-li`) is listed instead of vanishing from the profile.
+        val number = MGEKO_CHAPTER_NUMBER.find(path)?.groupValues?.get(1)?.replace('-', '.')
+        val label = number?.let { ChapterLabel(it, it.toDoubleOrNull()) }
+            ?: chapterLabel(path.replace('-', ' '))
             ?: continue
         chapters[path] = SourceChapter(
             remoteId = path,
-            numberText = number,
-            sortKey = chapterSortKey(number),
+            numberText = label.numberText,
+            sortKey = label.sortKey,
             title = null,
             language = "en",
             // The count arrives with the images on first read.
@@ -322,15 +325,17 @@ internal fun parseMgekoChapters(html: String): List<SourceChapter> {
 }
 
 /**
- * Every page is an `<img class="mgr-page">`, in reading order. The site appends its own credits
- * banner to the same list, so only the chapter's own image folder is kept.
+ * Every page is an `<img class="mgr-page">`, in reading order. The class is the marker to trust:
+ * the files moved from `/sv2/comic/...` to `/mg1/fastcdn/cdn_mangaraw/...` without it changing,
+ * so filtering on a folder name made every chapter resolve to no pages. The site appends its own
+ * credits banner to the same list, so that one image is dropped.
  */
 private val MGEKO_PAGE = Regex("""<img[^>]*class="mgr-page"[^>]*src="([^"]+)"""")
 
 internal fun parseMgekoPages(html: String): List<PageImage> =
     MGEKO_PAGE.findAll(html)
         .map { it.groupValues[1] }
-        .filter { it.contains("/comic/") && !it.contains("credits", ignoreCase = true) }
+        .filterNot { it.contains("credits", ignoreCase = true) }
         .distinct()
         .mapIndexed { index, url -> PageImage(index = index, url = url) }
         .toList()

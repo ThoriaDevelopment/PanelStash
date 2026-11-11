@@ -8,7 +8,7 @@
 ![Platform](https://img.shields.io/badge/Android-8.0%2B%20%28API%2026%29-A97BFF?style=flat-square&labelColor=1B1D24)
 ![Stack](https://img.shields.io/badge/Kotlin_2.4-Compose-D45EC4?style=flat-square&labelColor=1B1D24)
 ![Sources](https://img.shields.io/badge/sources-12-FB4B87?style=flat-square&labelColor=1B1D24)
-![Version](https://img.shields.io/badge/version-0.2-A97BFF?style=flat-square&labelColor=1B1D24)
+![Version](https://img.shields.io/badge/version-0.3-A97BFF?style=flat-square&labelColor=1B1D24)
 
 </div>
 
@@ -72,23 +72,25 @@ Look:
 ## Sources
 
 <div align="center">
-  <img src="assets/readme/sources.png" alt="The source picker in 0.2" width="740">
+  <img src="assets/readme/sources.png" alt="The source picker in 0.3" width="740">
 </div>
 
 - MangaDex: the widest catalogue, and the only site here with a documented API.
 - Asura Scans: big catalogue. Premium and early-access chapters show as unreadable.
+- Arena Scans: big WordPress catalogue with complete chapter lists and a full HTML reader. Its status filter only shows what the site files, which is nearly all ongoing.
+- Flame Comics: mostly manhwa, newest chapters free.
+- Lua Comic: curated manhwa catalogue. The newest chapters are coin-locked and show as unreadable.
 - Vortex Scans: smaller catalogue, fresh chapters.
 - Nyx Scans: small and curated, with some paid chapters.
-- Orion Scans: small catalogue, newest chapters free.
+- Orion Scans: small catalogue, newest chapters free. Detail, chapters and pages come from its JSON API.
 - Kayn Scans: wide catalogue, though the newest chapters are often coin-locked.
-- Flame Comics: mostly manhwa, newest chapters free.
+- Mgeko: large aggregator with plain readers, a broad manhwa catalogue, and genre, excluded-genre and status filters that work.
 - Weeb Central: big catalogue, and the chapter list arrives whole, so a 200 chapter run is one request.
 - Mangapill: large catalogue with its own genre filter, so Browse can be narrowed there without leaving the app.
-- Arena Scans: big WordPress catalogue with complete chapter lists and a full HTML reader. Its status filter only shows what the site files, which is nearly all ongoing.
-- Lua Comic: curated manhwa catalogue. The newest chapters are coin-locked and show as unreadable.
-- Mgeko: large aggregator with plain readers, a broad manhwa catalogue, and genre, excluded-genre and status filters that work.
 
-MangaDex is the only source with a documented API, and Lua Comic serves a JSON API of its own. The other ten are scanlation sites that the app reads through the same endpoints and pages their own front ends use, so their payloads can change without warning. All twelve sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter. Browse and search can also run across every source at once.
+The list is also the precedence order: when two sources publish the same chapter, the one higher up wins. Browse opens on **All sources**, so the first screen is the whole catalogue rather than one site's slice of it; pick a source when you want only that one.
+
+MangaDex is the only source with a documented API. The other eleven are scanlation sites that the app reads through the same endpoints and pages their own front ends use, so their payloads can change without warning. All twelve sit behind one interface, so the reader, the library and the downloads do not know which site served a chapter. Browse and search can also run across every source at once.
 
 A source declares what it can do, and the filter sheet only offers those controls:
 
@@ -134,14 +136,14 @@ keyPassword=...
 
 Without that file the release build still runs and produces an unsigned APK, so nothing about signing is required to compile the project.
 
-## What 0.2 leaves out
+## What 0.3 leaves out
 
 - New-chapter notifications and any polling for updates.
 - Accounts, sync, and reading progress shared between devices.
 - Titles without English chapters, and anything that is not manhwa.
 - Genre filtering on Nyx, Vortex and Orion. They publish a title's genres but ignore every filter parameter, so Browse shows no chips for them and their profiles still show the genres.
 
-## What changed in 0.2
+## What changed in 0.3
 
 - Genres on every source that publishes them, which brings genre chips to manhwa pages and genre-aware recommendations.
 - Browse by genre on the four sources that honour it, plus the "More in <genre>" row built from what you read most.
@@ -150,6 +152,18 @@ Without that file the release build still runs and produces an unsigned APK, so 
 - Library's three shelves swipe as pages.
 - Very tall pages that used to draw as a blurred smear now decode in bands.
 - Whole-page reading keeps a tall strip full width instead of shrinking it into a narrow column.
+
+## Loading and reliability
+
+- Pages near the one you are reading are fetched ahead of you, as bytes on disk, so a long scroll does not stop at a spinner. The page you are about to reach is left alone rather than racing the pages behind and ahead of it.
+- A page that fails to arrive is retried in the background, up to three times, without a spinner interrupting the chapter. A dropped connection, a timeout and a 5xx all retry; a 404 does not.
+- The next chapter is fetched before you reach the end of this one, so "next" opens to a full page.
+- A chapter that a profile lists always opens. If the copy you clicked cannot serve its pages, the same chapter number is opened from the next source in the precedence order, and your progress still points at the title you came from.
+- Long chapter lists are written in two batches instead of one transaction per chapter, so a merged list of several hundred chapters appears at once.
+- No single site can hold a screen hostage: every cross-source browse, search and link is capped at a few seconds, and the sources that answer are shown while the slow ones finish.
+- A chapter a site names instead of numbering — a prologue, a side story, an extras entry — is listed under that name, with a prologue opening the series and the rest after the numbered run. Those chapters used to be dropped from the profile entirely.
+- Chapter lists are read whatever a site calls them. Weeb Central titles labelled "Episode 259" and Arena Scans' first chapter are no longer lost: one series answered with an empty chapter list, and the other was always missing chapter 1.
+- A long Kayn Scans series no longer stops at its first 100 chapters. The site streams only the oldest 100 rows of a longer run and publishes the real tally beside them, so the rest are now read from the paged endpoint.
 
 ## About the content
 

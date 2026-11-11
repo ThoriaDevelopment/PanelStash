@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
+import coil3.request.crossfade
 import coil3.size.Precision
 import com.panelstash.PanelStashApp
 import com.panelstash.data.Preferences
@@ -28,9 +29,12 @@ import com.panelstash.source.SourceCapabilities
 import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
 import com.panelstash.update.UpdateState
+import com.panelstash.ui.warmRequest
+import java.util.Collections
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -42,10 +46,26 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 private const val BROWSE_PAGE = 30
 private const val SEARCH_PAGE = 30
-private const val PREFETCH_AHEAD = 3
+
+/**
+ * Pages whose encoded bytes are warmed ahead of the reader. The two pages just ahead are left to
+ * the reader itself: warming them would put four more transfers in front of the page the reader is
+ * about to look at, which on a slow link makes the visible page arrive later, not sooner.
+ */
+private const val PREFETCH_AHEAD = 6
+
+/** The first page ahead that is warmed rather than left to the reader. */
+private const val PREFETCH_NEAR_GAP = 2
+
+/** Pages kept warm behind the reader, so scrolling back up is a cache hit too. */
+private const val PREFETCH_BEHIND = 2
+
+/** Pages decoded whole ahead of the reader. Only pages that fit in one bitmap can be. */
+private const val PREFETCH_DECODED_AHEAD = 4
 
 /** Typing is searched after this pause, so a name is one request instead of one per letter. */
 private const val SEARCH_DEBOUNCE_MS = 350L
@@ -64,8 +84,17 @@ private const val CHAPTER_REFRESH_MS = 6 * 60 * 60 * 1000L
 /** The other sources carrying an opened title are looked for again after this long. */
 private const val LINK_REFRESH_MS = 10 * 60 * 1000L
 
-/** Taller pages skip prefetching; they decode slowly and would crowd the memory cache. */
-private const val MAX_PREFETCH_HEIGHT = 8_192
+/** How long one source may take to open a linked copy of a title. */
+private const val LINK_OPEN_TIMEOUT_MS = 15_000L
+
+/**
+ * Taller pages are drawn as bands, so only their bytes are warmed. Decoding one whole would be a
+ * multi-megabyte bitmap that the reader never asks for.
+ */
+private const val MAX_DECODE_AHEAD_HEIGHT = 8_192
+
+/** How many pages of the next chapter are warmed when the reader nears the end. */
+private const val NEXT_CHAPTER_WARM_PAGES = 3
 
 /** Roughly the shape of one slice of a webtoon page, used when the source does not say. */
 const val FALLBACK_PAGE_ASPECT = 0.64f
@@ -189,7 +218,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var similarJob: Job? = null
     private var matchJob: Job? = null
     private var genresRequestedFor: String? = null
-    private var prefetchedUpTo = -1
+    private var prepareNextJob: Job? = null
+    /** The chapter whose successor has already been warmed. */
+    private var preparedNextFor = -1L
+    /** The page list the two prefetch sets below belong to. A new chapter resets them. */
+    private var prefetchPages: List<ReaderPage>? = null
+    private val prefetchedBytes = HashSet<Int>()
+    private val prefetchedPictures = HashSet<Int>()
     /** Per-source offsets while Browse is showing every installed source. */
     private var allBrowseOffsets: Map<String, Int> = emptyMap()
     private val chaptersInFlight = mutableSetOf<Long>()
@@ -206,19 +241,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var matchChain: MatchChain? = null
 
     init {
-        // Browse starts on the default source, and its capabilities come along: without them the
-        // first screen would offer no genre chips, no sort selector and an empty filter sheet
-        // until the user happened to switch source.
-        val source = library.source(settings.current.defaultSourceId) ?: library.installedSources().firstOrNull()
+        // Browse starts on All Sources unless the reader has pinned a startup source, and the
+        // matching capabilities come along: without them the first screen would offer no sort
+        // selector and an empty filter sheet until the user happened to switch source.
+        val startId = settings.current.defaultSourceId
+        val source = library.installedSources().firstOrNull { it.id == startId }
         _browse.value = _browse.value.copy(
-            sourceId = source?.id ?: _browse.value.sourceId,
-            sourceName = source?.name ?: _browse.value.sourceName,
-            capabilities = source?.capabilities ?: _browse.value.capabilities,
+            sourceId = source?.id ?: ALL_SOURCES,
+            sourceName = source?.name ?: "All sources",
+            capabilities = source?.capabilities ?: allSourceCapabilities(),
             sources = library.installedSources(),
             sort = source?.capabilities?.sorts?.minByOrNull { it.ordinal } ?: BrowseSort.LATEST,
             filter = settings.current.browseFilter,
         )
     }
+
+    /** What Browse can offer when every source is selected: only what all of them understand. */
+    private fun allSourceCapabilities() = SourceCapabilities(
+        sorts = setOf(BrowseSort.LATEST),
+        // Status is the one filter every installed source understands.
+        status = true,
+    )
 
     fun clearMessage() {
         _message.value = null
@@ -423,11 +466,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _browse.value = _browse.value.copy(
             sourceId = sourceId,
             sourceName = source?.name ?: "All sources",
-            capabilities = source?.capabilities ?: SourceCapabilities(
-                sorts = setOf(BrowseSort.LATEST),
-                // Status is the one filter every installed source understands.
-                status = true,
-            ),
+            capabilities = source?.capabilities ?: allSourceCapabilities(),
             sources = library.installedSources(),
             // The capabilities are a set, whose order is not the order the UI shows: pick the
             // same sort the screen would start on, not whatever the set happened to yield.
@@ -832,14 +871,26 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val matches = runCatching {
                     library.findEverywhere(names, excluding = setOf(manhwa.sourceId))
                 }.getOrNull().orEmpty()
-                val ids = mutableListOf<Long>()
-                for ((source, target) in matches) {
-                    val id = runCatching { library.openManhwa(source.id, target.remoteId) }
-                        .getOrNull() ?: continue
-                    if (id != manhwaId && id !in ids) ids += id
+                // Every copy is a detail page plus a chapter list. Opening them one after another
+                // made the merged list wait for one source at a time, so they are opened at once
+                // and each is published as soon as it lands: the profile fills in its chapters
+                // instead of staying empty until the slowest site answers.
+                val ids = Collections.synchronizedList(mutableListOf<Long>())
+                coroutineScope {
+                    matches.forEach { (source, target) ->
+                        launch {
+                            val id = withTimeoutOrNull(LINK_OPEN_TIMEOUT_MS) {
+                                runCatching { library.openManhwa(source.id, target.remoteId) }
+                                    .getOrNull()
+                            } ?: return@launch
+                            if (id == manhwaId || id in ids) return@launch
+                            ids += id
+                            linked.value = linked.value + (manhwaId to ids.toList())
+                        }
+                    }
                 }
                 linkedAt[manhwaId] = System.currentTimeMillis()
-                linked.value = linked.value + (manhwaId to ids)
+                linked.value = linked.value + (manhwaId to ids.toList())
             } finally {
                 linkJobs.remove(manhwaId)
             }
@@ -1015,7 +1066,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         readerJob?.cancel()
         readerJob = viewModelScope.launch {
             _reader.value = null
-            prefetchedUpTo = -1
+            resetPrefetch()
             val chapter = library.chapter(chapterId)
             val manhwa = chapter?.let { container.db.manhwaDao().byId(it.manhwaId) }
             if (chapter == null || manhwa == null) {
@@ -1024,27 +1075,32 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 return@launch
             }
             val owner = ownerManhwaId ?: manhwa.id
-            val saved = library.resume(owner)
-            val start = when {
-                pageIndex > 0 -> pageIndex
-                saved?.chapterId == chapter.id -> saved.pageIndex
-                else -> 0
-            }
-            runCatching { container.reader.pages(chapter, manhwa) }
-                .onSuccess { pages ->
+            runCatching { resolvePages(chapter, manhwa, owner) }
+                .onSuccess { open ->
+                    // The chapter that will actually be read: normally the one that was clicked,
+                    // or a sibling source's copy of the same number when that one has no pages.
+                    val pages = open.pages
+                    val saved = library.resume(owner)
+                    val start = when {
+                        pageIndex > 0 -> pageIndex
+                        saved?.chapterId == open.chapter.id -> saved.pageIndex
+                        else -> 0
+                    }
                     // Sources that report page counts only when a chapter opens store them here,
                     // so resume, progress and clamping stay accurate.
-                    if (pages.size != chapter.pageCount) library.updatePageCount(chapter.id, pages.size)
-                    val fresh = library.chapter(chapter.id) ?: chapter
+                    if (pages.size != open.chapter.pageCount) {
+                        library.updatePageCount(open.chapter.id, pages.size)
+                    }
+                    val fresh = library.chapter(open.chapter.id) ?: open.chapter
                     val resolved = start.coerceIn(0, maxOf(0, pages.size - 1))
                     _reader.value = ReaderState(
-                        manhwa = manhwa,
+                        manhwa = open.manhwa,
                         ownerManhwaId = owner,
                         chapter = fresh,
                         pages = pages,
                         startPage = resolved,
                         nextChapterId = library
-                            .nextChapterIn(groupOf(owner), chapter.id, rankForTitle(owner))?.id,
+                            .nextChapterIn(groupOf(owner), fresh.id, rankForTitle(owner))?.id,
                     )
                     prefetch(pages, resolved)
                 }
@@ -1055,27 +1111,104 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** A chapter's pages together with the copy of the chapter they came from. */
+    private data class OpenPages(
+        val chapter: ChapterEntity,
+        val manhwa: ManhwaEntity,
+        val pages: List<ReaderPage>,
+    )
+
+    /**
+     * Resolves a chapter's pages, falling back to another source's copy of the same chapter when
+     * the copy that was listed cannot produce them.
+     *
+     * The profile merges every source's chapters and keeps one copy of each number, so a chapter
+     * whose images were removed, moved or locked on the winning source reads as "not available"
+     * while the same chapter is perfectly readable on a sibling source. The reader never sees the
+     * difference: the sibling's pages are opened, and progress is still saved against the title
+     * the reader came from, so "continue reading" leads straight back to a working copy.
+     */
+    private suspend fun resolvePages(
+        chapter: ChapterEntity,
+        manhwa: ManhwaEntity,
+        owner: Long,
+    ): OpenPages {
+        val first = runCatching { container.reader.pages(chapter, manhwa) }
+        first.getOrNull()?.takeIf { it.isNotEmpty() }?.let { return OpenPages(chapter, manhwa, it) }
+        val error = first.exceptionOrNull()
+        // A dropped connection or a source that did not answer is worth one more try before the
+        // chapter is treated as missing.
+        if (error is SourceError.Transient || error is SourceError.Offline) {
+            delay(200)
+            runCatching { container.reader.pages(chapter, manhwa) }
+                .getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+                ?.let { return OpenPages(chapter, manhwa, it) }
+        }
+        val alternatives = runCatching {
+            library.alternativeCopies(
+                manhwaIds = groupOf(owner),
+                numberText = chapter.numberText,
+                excludingChapterId = chapter.id,
+                rank = rankForTitle(owner),
+            )
+        }.getOrNull().orEmpty()
+        for ((copy, copyManhwa) in alternatives) {
+            val pages = runCatching { container.reader.pages(copy, copyManhwa) }
+                .getOrNull()
+                ?.takeIf { it.isNotEmpty() }
+                ?: continue
+            return OpenPages(copy, copyManhwa, pages)
+        }
+        throw error ?: SourceError.Unavailable()
+    }
+
     /** Called by the reader, which is the only part of the app that knows its window's width. */
     fun setViewportWidth(widthPx: Int) {
         if (widthPx > 0) viewportWidthPx = widthPx
     }
 
     /**
-     * Warm the next few pages so scrolling does not wait on the network. Downloads are already
-     * local, and the requests are sized like the reader's own, so a hit lands in the memory cache
-     * and a miss still lands in the disk cache the reader will read from.
+     * Warms the pages around the reader so scrolling never waits on the network.
      *
-     * Called again as the reader moves down the chapter: the high-water mark makes the repeat
-     * calls free, and a jump forward still warms the pages beyond it.
+     * Two levels, because a page's cost depends on its shape. Every page in the window has its
+     * **encoded bytes** fetched into the disk cache: that is the network cost, and for a 15,000 px
+     * webtoon strip it is the only cost, since its bands then decode locally from those bytes. A
+     * page short enough to be drawn in one bitmap is also **decoded**, so it paints straight from
+     * the memory cache. Pages behind the reader are warmed too, so scrolling back up is free.
+     *
+     * Called again as the reader moves: the two sets make a repeat call free, and a jump forward
+     * still warms everything beyond the jump. The previous high-water mark could not do that — a
+     * jump made the pages it skipped permanently cold, which is exactly where a black screen
+     * appeared.
      */
     fun prefetch(pages: List<ReaderPage>, from: Int) {
-        val start = from + 1
-        val end = (start + PREFETCH_AHEAD).coerceAtMost(pages.size)
-        if (start >= end || start < prefetchedUpTo) return
-        prefetchedUpTo = end
+        if (pages.isEmpty()) return
+        if (pages !== prefetchPages) {
+            prefetchPages = pages
+            prefetchedBytes.clear()
+            prefetchedPictures.clear()
+        }
         val width = if (viewportWidthPx > 0) viewportWidthPx else container.screenWidthPx()
+        val context = getApplication<Application>()
+        val firstByte = (from - PREFETCH_BEHIND).coerceAtLeast(0)
+        val lastByte = (from + PREFETCH_AHEAD).coerceAtMost(pages.lastIndex)
+        // Pages behind are usually already in the sets, so a warm loop over them costs nothing.
+        val firstPicture = from + PREFETCH_NEAR_GAP
+        val lastPicture = (from + PREFETCH_DECODED_AHEAD).coerceAtMost(pages.lastIndex)
+        // Behind the reader, then beyond the gap: never the page under the reader's eyes.
+        val byteWindow = sequence {
+            for (index in firstByte until from) yield(index)
+            for (index in (from + PREFETCH_NEAR_GAP)..lastByte) yield(index)
+        }
         viewModelScope.launch {
-            for (index in start until end) {
+            for (index in byteWindow) {
+                if (!prefetchedBytes.add(index)) continue
+                val page = pages[index] as? ReaderPage.Remote ?: continue
+                container.imageLoader.enqueue(warmRequest(context, page.url))
+            }
+            for (index in firstPicture..lastPicture) {
+                if (!prefetchedPictures.add(index)) continue
                 val page = pages[index] as? ReaderPage.Remote ?: continue
                 val pageWidth = if (page.width > 0) minOf(width, page.width) else width
                 val height = if (page.width > 0 && page.height > 0) {
@@ -1083,19 +1216,55 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     (pageWidth / (page.aspectOrNull() ?: FALLBACK_PAGE_ASPECT)).toInt()
                 }
-                // A 15,000 px strip is several tens of megabytes. Warming three of those would
-                // evict everything else and can exhaust the heap, so they warm on demand only.
-                if (height > MAX_PREFETCH_HEIGHT) continue
+                // A strip this tall is drawn as bands; decoding it whole would be a bitmap the
+                // reader never asks for. Its bytes are already warming above.
+                if (height > MAX_DECODE_AHEAD_HEIGHT) continue
                 container.imageLoader.enqueue(
-                    ImageRequest.Builder(getApplication())
+                    ImageRequest.Builder(context)
                         .data(page.url)
                         .size(pageWidth, height)
                         .precision(Precision.INEXACT)
                         .allowHardware(true)
+                        .crossfade(false)
                         .build(),
                 )
             }
         }
+    }
+
+    /**
+     * Resolves the next chapter and warms its opening pages while the reader is still a few pages
+     * from the end, so stepping over the end card opens a full reader instead of an empty one.
+     *
+     * Only the copy that is about to open is resolved: if it turns out to be unreadable, the
+     * fallback in [openChapter] finds another one anyway.
+     */
+    fun prepareNext(chapterId: Long) {
+        if (preparedNextFor == chapterId) return
+        if (prepareNextJob?.isActive == true) return
+        val state = _reader.value?.takeIf { it.chapter.id == chapterId } ?: return
+        preparedNextFor = chapterId
+        prepareNextJob = viewModelScope.launch {
+            val owner = state.ownerManhwaId
+            val next = library.nextChapterIn(groupOf(owner), chapterId, rankForTitle(owner))
+                ?: return@launch
+            val manhwa = container.db.manhwaDao().byId(next.manhwaId) ?: return@launch
+            val pages = runCatching { container.reader.pages(next, manhwa) }.getOrNull()
+                ?: return@launch
+            val context = getApplication<Application>()
+            for (page in pages.take(NEXT_CHAPTER_WARM_PAGES)) {
+                val remote = page as? ReaderPage.Remote ?: continue
+                container.imageLoader.enqueue(warmRequest(context, remote.url))
+            }
+        }
+    }
+
+    /** The prefetch sets only describe one chapter's pages. */
+    private fun resetPrefetch() {
+        prefetchPages = null
+        prefetchedBytes.clear()
+        prefetchedPictures.clear()
+        preparedNextFor = -1L
     }
 
     /**
@@ -1161,7 +1330,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             container.scheduler.enqueue(manhwa, chapters, quality, metered)
             _message.value = if (chapters.size == 1) {
-                "Downloading chapter ${chapters.first().numberText}"
+                "Downloading ${chapterHeading(chapters.first().numberText)}"
             } else {
                 "Downloading ${chapters.size} chapters"
             }
@@ -1202,7 +1371,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _pendingUndo.value = if (undoable) {
                 PendingUndo(
                     chapterId = chapterId,
-                    label = number?.let { "Chapter $it deleted" } ?: "Download deleted",
+                    label = number?.let { "${chapterHeading(it)} deleted" } ?: "Download deleted",
                 )
             } else {
                 null

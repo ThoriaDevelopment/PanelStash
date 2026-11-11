@@ -42,7 +42,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,6 +75,7 @@ import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import coil3.request.ImageRequest
 import coil3.request.allowHardware
+import coil3.request.crossfade
 import coil3.size.Precision
 import com.panelstash.data.PageFit
 import com.panelstash.data.ReaderPage
@@ -87,9 +90,12 @@ import com.panelstash.ui.PillButton
 import com.panelstash.ui.PillTone
 import com.panelstash.ui.ProgressBar
 import com.panelstash.ui.Sheet
+import com.panelstash.ui.chapterBadge
+import com.panelstash.ui.chapterHeading
 import com.panelstash.ui.theme.Palette
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
@@ -231,9 +237,12 @@ fun ReaderScreen(vm: AppViewModel) {
             val index = liveSlots.pageOf.getOrElse(slot) { current.pages.lastIndex.coerceAtLeast(0) }
             if (index <= current.pages.lastIndex) {
                 vm.saveProgress(current.ownerManhwaId, current.chapter.id, index)
-                // Keep the next few pages warm as the reader moves down the chapter, so a fast
-                // scroll or a tap never waits on the network for a page that is about to appear.
+                // Keep the pages around the reader warm, so a fast scroll or a tap never waits
+                // on the network for a page that is about to appear.
                 vm.prefetch(current.pages, index)
+                // Near the end, the chapter after this one is resolved and its first pages
+                // fetched in the background, so the end card leads into a ready reader.
+                if (index >= current.pages.size - 3) vm.prepareNext(current.chapter.id)
             }
             if (index >= current.pages.lastIndex && !markedFinished) {
                 markedFinished = true
@@ -483,9 +492,9 @@ fun ReaderScreen(vm: AppViewModel) {
                     items(chapters, key = { it.id }) { chapter ->
                         val here = chapter.id == current.chapter.id
                         ListRow(
-                            title = "Chapter ${chapter.numberText}",
+                            title = chapterHeading(chapter.numberText),
                             coverUrl = null,
-                            badge = chapter.numberText.take(4),
+                            badge = chapterBadge(chapter.numberText),
                             subtitle = chapter.title,
                             onClick = {
                                 showChapters = false
@@ -537,21 +546,70 @@ private fun PageBand(model: Any, band: Int, bands: Int, aspect: Float) {
     // background at every seam. The band's own shape is exact, so it is taken from the decoded
     // bitmap as soon as it arrives.
     var bandAspect by remember(model, band, bands) { mutableFloatStateOf(aspect) }
-    AsyncImage(
-        model = request,
-        contentDescription = null,
+    RetryingAsyncImage(
+        request = request,
         // Pinned to the top so the band's one row of overlap is cropped from its bottom edge,
         // where the band below carries the same pixels.
         alignment = Alignment.TopCenter,
         contentScale = ContentScale.FillWidth,
-        onState = { state ->
-            if (state is AsyncImagePainter.State.Success) {
-                val size = state.painter.intrinsicSize
-                if (size.width > 0f && size.height > 0f) bandAspect = size.width / size.height
-            }
+        onSuccess = { state ->
+            val size = state.painter.intrinsicSize
+            if (size.width > 0f && size.height > 0f) bandAspect = size.width / size.height
         },
         modifier = Modifier.fillMaxWidth().aspectRatio(bandAspect),
     )
+}
+
+/** Times a reader image is asked for again after a failure. */
+private const val IMAGE_RETRIES = 3
+
+/**
+ * Draws a reader image, and asks for it again when the load fails.
+ *
+ * A page that failed once used to stay black for as long as the reader looked at it: Coil does not
+ * retry, and nothing re-issued the request until the chapter was closed and opened again — which
+ * is why going back to the same chapter made the same page appear instantly. The retries are
+ * silent, because a spinner in the middle of a chapter is worse than a page that fills in a moment
+ * later, and they stop after a few attempts so a genuinely missing page does not loop for ever.
+ */
+@Composable
+private fun RetryingAsyncImage(
+    /** An [ImageRequest], or a plain model when the page has no measured width to size it by. */
+    request: Any,
+    contentScale: ContentScale,
+    modifier: Modifier,
+    alignment: Alignment = Alignment.Center,
+    onSuccess: (AsyncImagePainter.State.Success) -> Unit = {},
+) {
+    var failures by remember(request) { mutableIntStateOf(0) }
+    var retrying by remember(request) { mutableStateOf(false) }
+    LaunchedEffect(request, retrying) {
+        if (!retrying) return@LaunchedEffect
+        retrying = false
+        if (failures >= IMAGE_RETRIES) return@LaunchedEffect
+        // 400 ms, 800 ms, 1.6 s: long enough for a rate limit or a dropped connection to clear,
+        // short enough that a reader who stops on the page sees it fill in.
+        delay(400L shl failures)
+        failures++
+    }
+    // A new composition is what re-issues the request: Coil caches successes, never failures, so
+    // the same request object simply runs again.
+    key(failures) {
+        AsyncImage(
+            model = request,
+            contentDescription = null,
+            contentScale = contentScale,
+            alignment = alignment,
+            onState = { state ->
+                when (state) {
+                    is AsyncImagePainter.State.Success -> onSuccess(state)
+                    is AsyncImagePainter.State.Error -> retrying = true
+                    else -> Unit
+                }
+            },
+            modifier = modifier,
+        )
+    }
 }
 
 @Composable
@@ -601,24 +659,23 @@ private fun LazyItemScope.ReaderPageImage(
                 // A hardware bitmap is uploaded as one texture. Very tall strips exceed the
                 // limit and fail to draw, so those decode in software instead.
                 .allowHardware(requestHeight <= MAX_HARDWARE_DIMENSION)
+                // The page is drawn the moment it decodes; a fade would only delay it.
+                .crossfade(false)
                 .build()
         }
     }
 
-    AsyncImage(
-        model = request,
-        contentDescription = null,
+    RetryingAsyncImage(
+        request = request,
         contentScale = if (wholePage) ContentScale.Fit else ContentScale.FillWidth,
-        onState = { state ->
-            if (state is AsyncImagePainter.State.Success) {
-                val size = state.painter.intrinsicSize
-                if (size.width > 0f && size.height > 0f) {
-                    val measured = size.width / size.height
-                    aspect = measured
-                    // Only pages whose source did not measure them need telling: the answer
-                    // decides whether the page has to be cut into bands.
-                    if (aspectHint == null) onMeasured(measured)
-                }
+        onSuccess = { state ->
+            val size = state.painter.intrinsicSize
+            if (size.width > 0f && size.height > 0f) {
+                val measured = size.width / size.height
+                aspect = measured
+                // Only pages whose source did not measure them need telling: the answer decides
+                // whether the page has to be cut into bands.
+                if (aspectHint == null) onMeasured(measured)
             }
         },
         modifier = shape,
@@ -702,7 +759,7 @@ private fun ReaderTopBar(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Eyebrow("CHAPTER $chapter", color = Palette.ReaderInkSecondary)
+            Eyebrow(chapterHeading(chapter).uppercase(), color = Palette.ReaderInkSecondary)
         }
         IconButton(
             glyph = Glyph.Books,

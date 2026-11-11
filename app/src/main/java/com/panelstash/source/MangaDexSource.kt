@@ -208,15 +208,29 @@ class MangaDexSource(
         atHomeLimiter.acquire()
         val body = request("/at-home/server/$chapterRemoteId")
         val dto = Network.json.decodeFromString<AtHomeResponse>(body)
-        val files = when (quality) {
+        // A chapter sometimes has only one of the two renditions: an upload can carry data-
+        // saver files and no original, or the reverse. Reading whichever exists beats failing
+        // the chapter over a quality setting.
+        val preferred = when (quality) {
             PageQuality.ORIGINAL -> dto.chapter.data
             PageQuality.DATA_SAVER -> dto.chapter.dataSaver
         }
+        val files = preferred.ifEmpty {
+            when (quality) {
+                PageQuality.ORIGINAL -> dto.chapter.dataSaver
+                PageQuality.DATA_SAVER -> dto.chapter.data
+            }
+        }
         if (files.isEmpty()) throw SourceError.Unavailable()
+        // The URLs must be built from the rendition that actually exists.
+        val apiValue = when (quality) {
+            PageQuality.ORIGINAL -> if (preferred.isNotEmpty()) quality.apiValue else PageQuality.DATA_SAVER.apiValue
+            PageQuality.DATA_SAVER -> if (preferred.isNotEmpty()) quality.apiValue else PageQuality.ORIGINAL.apiValue
+        }
         val images = files.mapIndexed { index, fileName ->
             PageImage(
                 index = index,
-                url = "${dto.baseUrl}/${quality.apiValue}/${dto.chapter.hash}/$fileName",
+                url = "${dto.baseUrl}/$apiValue/${dto.chapter.hash}/$fileName",
             )
         }
         return PageSet(baseUrl = dto.baseUrl, images = images)

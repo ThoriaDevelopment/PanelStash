@@ -106,6 +106,16 @@ class MgekoMappingTest {
         </div>
     """.trimIndent()
 
+    /** The reader layout live on 2026-11-10, after the image files moved to a new CDN path. */
+    private val readerFastCdn = """
+        <div class="mgr-reader">
+          <img class="mgr-page" src="https://imgsrv5.com/mg1/fastcdn/cdn_mangaraw/starting-as-the-god-of-wealth-taming-billions-of-divine-pets/chapter-1/0.jpg" loading="eager" alt="Starting As The God Of Wealth Chapter 1 Page 1">
+          <img class="mgr-page" src="https://imgsrv5.com/mg1/fastcdn/cdn_mangaraw/starting-as-the-god-of-wealth-taming-billions-of-divine-pets/chapter-1/1.jpg" loading="eager" alt="Starting As The God Of Wealth Chapter 1 Page 2">
+          <img class="mgr-page" width="968" height="540" loading="lazy" alt="Mgeko credits" src="https://imgsrv5.com/credits-mgeko.png">
+          <img class="mgr-page" src="https://imgsrv5.com/mg1/fastcdn/cdn_mangaraw/starting-as-the-god-of-wealth-taming-billions-of-divine-pets/chapter-1/2.jpg" loading="eager" alt="Starting As The God Of Wealth Chapter 1 Page 3">
+        </div>
+    """.trimIndent()
+
     private val searchForm = """
         <select name="status"><option value="Ongoing">Ongoing</option></select>
         <input name="options[]" type="checkbox" value="Action">
@@ -163,11 +173,37 @@ class MgekoMappingTest {
     }
 
     @Test
+    fun `an unnumbered chapter path is kept instead of skipped`() {
+        val payload = """
+            <ul class="chapter-list">
+              <li><a href="/reader/en/9m32-bandit-king-prologue-eng-li/">Prologue</a></li>
+              <li><a href="/reader/en/9m32-bandit-king-chapter-1-eng-li/">Chapter 1</a></li>
+            </ul>
+        """.trimIndent()
+
+        val parsed = dedupeChapters(parseMgekoChapters(payload))
+
+        assertEquals(listOf("Prologue", "1"), parsed.map { it.numberText })
+        assertEquals("9m32-bandit-king-prologue-eng-li", parsed.first().remoteId)
+    }
+
+    @Test
     fun `pages keep the chapter folder and drop the credits banner`() {
         val pages = parseMgekoPages(reader)
 
         assertEquals(3, pages.size)
         assertTrue(pages.all { it.url.startsWith("https://imgsrv5.com/sv2/comic/") })
+        assertEquals(listOf(0, 1, 2), pages.map { it.index })
+    }
+
+    @Test
+    fun `pages do not depend on the CDN folder name`() {
+        // The folder moved from /sv2/comic/ to /mg1/fastcdn/cdn_mangaraw/; a chapter is listed
+        // either way, so the parser must not filter on a path that the site can rename.
+        val pages = parseMgekoPages(readerFastCdn)
+
+        assertEquals(3, pages.size)
+        assertTrue(pages.all { it.url.contains("/mg1/fastcdn/cdn_mangaraw/") })
         assertEquals(listOf(0, 1, 2), pages.map { it.index })
     }
 

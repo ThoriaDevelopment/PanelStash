@@ -1,6 +1,7 @@
 package com.panelstash.data
 
 import com.panelstash.data.db.ChapterEntity
+import com.panelstash.source.chapterLabel
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -31,7 +32,8 @@ class ChapterMergeTest {
         sourceId = source,
         remoteId = "$source-$number",
         numberText = number,
-        sortKey = number.toDoubleOrNull(),
+        // Named chapters are placed the way a source's own label places them.
+        sortKey = chapterLabel(number)?.sortKey,
         pageCount = pages,
         externalUrl = external,
     )
@@ -102,6 +104,21 @@ class ChapterMergeTest {
             rank,
         )
         assertEquals(listOf("2", "10", "Note"), merged.map { it.numberText })
+    }
+
+    @Test
+    fun `a prologue reads first and a side story last`() {
+        val merged = mergeChapters(
+            listOf(
+                chapter("mangadex", "1"),
+                chapter("mangadex", "Side Story"),
+                chapter("mangadex", "Prologue"),
+                chapter("mangadex", "2"),
+            ),
+            rank,
+        )
+
+        assertEquals(listOf("Prologue", "1", "2", "Side Story"), merged.map { it.numberText })
     }
 
     @Test

@@ -123,6 +123,42 @@ class WeebCentralMappingTest {
     }
 
     @Test
+    fun `a series labelled by episode keeps every row`() {
+        // Some series write "Episode 259" instead of "Chapter 259"; reading only "Chapter" used
+        // to drop all of them, so the chapter list arrived empty.
+        val payload = """
+            <a href="/chapters/01J76XZ666GREP4DQDKEP1YDZG" class="hover:bg-base-300 flex-1 flex items-center p-2">
+              <span class="grow flex items-center gap-2"><span class="">Episode 259</span></span>
+            </a>
+            <a href="/chapters/01J76XZ6614Z72ZP8CDK0PV0V3" class="hover:bg-base-300 flex-1 flex items-center p-2">
+              <span class="grow flex items-center gap-2"><span class="">Episode 258</span></span>
+            </a>
+        """.trimIndent()
+
+        val chapters = dedupeChapters(parseWeebChapters(payload, "01J76XYCPSY3C4BNPBRY8JMCBE"))
+
+        assertEquals(listOf("258", "259"), chapters.map { it.numberText })
+        assertEquals(259.0, chapters.last().sortKey!!, 0.0001)
+    }
+
+    @Test
+    fun `a prologue row is kept beside the numbers and reads first`() {
+        val payload = """
+            <a href="/chapters/01J76XZ666GREP4DQDKEP1YDZG" class="hover:bg-base-300 flex-1 flex items-center p-2">
+              <span class="grow flex items-center gap-2"><span class="">Chapter 200</span></span>
+            </a>
+            <a href="/chapters/01J76XZ000PROLOGUE00000000" class="hover:bg-base-300 flex-1 flex items-center p-2">
+              <span class="grow flex items-center gap-2"><span class="">Prologue</span></span>
+            </a>
+        """.trimIndent()
+
+        val chapters = dedupeChapters(parseWeebChapters(payload, "01J76XYCPSY3C4BNPBRY8JMCBE"))
+
+        assertEquals(listOf("Prologue", "200"), chapters.map { it.numberText })
+        assertEquals("01J76XZ000PROLOGUE00000000", chapters.first().remoteId)
+    }
+
+    @Test
     fun `reader images keep their order and drop the site's own icons`() {
         val images = parseWeebPages(readerPayload)
 

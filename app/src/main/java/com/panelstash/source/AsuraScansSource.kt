@@ -194,12 +194,16 @@ internal fun AsuraSeriesDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
 )
 
 internal fun AsuraChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {
-    val number = number ?: return null
     if (slug.isBlank()) return null
+    // Almost every chapter is numbered. One the API leaves unnumbered keeps its slug as a name
+    // ("prologue") rather than disappearing from the profile.
+    val label = number?.let { ChapterLabel(formatNumber(it), it) }
+        ?: chapterLabel(slug.replace('-', ' '))
+        ?: return null
     return SourceChapter(
         remoteId = "$seriesSlug|$slug",
-        numberText = formatNumber(number),
-        sortKey = number,
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = null,
         language = "en",
         pageCount = pageCount,

@@ -117,6 +117,39 @@ class ArenaMappingTest {
     }
 
     @Test
+    fun `the first chapter is not lost to its extra row attribute`() {
+        // The site marks chapter 1 with `class="first-chapter"`, the only row that carries a
+        // second attribute; it used to make that row unmatchable.
+        val page = """
+            <ul>
+              <li data-num="2"> <div class="chbox"> <div class="eph-num"> <a href="https://arenascan.com/eleceed-2/"> <span class="chapternum">Chapter 2</span> </a> </div> </div> </li>
+              <li data-num="1" class="first-chapter"> <div class="chbox"> <div class="eph-num"> <a href="https://arenascan.com/eleceed-1/"> <span class="chapternum">Chapter 1</span> </a> </div> </div> </li>
+            </ul>
+        """.trimIndent()
+
+        val parsed = dedupeChapters(parseArenaChapters(page))
+
+        assertEquals(listOf("1", "2"), parsed.map { it.numberText })
+        assertEquals("eleceed-1", parsed.first().remoteId)
+    }
+
+    @Test
+    fun `a prologue beside the numbered chapters is kept and reads first`() {
+        val page = """
+            <ul>
+              <li data-num="1"> <div class="chbox"> <div class="eph-num"> <a href="https://arenascan.com/eleceed-chapter-1/"> <span class="chapternum">Chapter 1</span> </a> </div> </div> </li>
+              <li data-num="0"> <div class="chbox"> <div class="eph-num"> <a href="https://arenascan.com/eleceed-prologue/"> <span class="chapternum">Prologue</span> </a> </div> </div> </li>
+            </ul>
+        """.trimIndent()
+
+        val parsed = dedupeChapters(parseArenaChapters(page))
+
+        assertEquals(listOf("Prologue", "1"), parsed.map { it.numberText })
+        assertEquals("eleceed-prologue", parsed.first().remoteId)
+        assertEquals(0.0, parsed.first().sortKey!!, 0.0001)
+    }
+
+    @Test
     fun `pages come from the chapter CDN only and keep reading order`() {
         val pages = parseArenaPages(reader)
 

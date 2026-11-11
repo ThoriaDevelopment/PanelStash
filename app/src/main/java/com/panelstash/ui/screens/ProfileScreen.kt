@@ -71,6 +71,8 @@ import com.panelstash.ui.Shimmer
 import com.panelstash.ui.SimilarState
 import com.panelstash.ui.TopBar
 import com.panelstash.ui.availableStorageBytes
+import com.panelstash.ui.chapterBadge
+import com.panelstash.ui.chapterHeading
 import com.panelstash.ui.formatBytes
 import com.panelstash.ui.isMetered
 import com.panelstash.ui.pressable
@@ -667,6 +669,10 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             val wanted = jumpQuery.trim().trimStart('0').ifEmpty { "0" }
                             val target = chapterList.firstOrNull { it.numberText == wanted }
                                 ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
+                                // A named chapter can be reached by its name ("prologue").
+                                ?: chapterList.firstOrNull {
+                                    it.numberText.contains(jumpQuery.trim(), ignoreCase = true)
+                                }
                             if (target != null) {
                                 openChapter(target)
                                 showJump = false
@@ -682,6 +688,10 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             val wanted = jumpQuery.trim().trimStart('0').ifEmpty { "0" }
                             val target = chapterList.firstOrNull { it.numberText == wanted }
                                 ?: chapterList.firstOrNull { it.numberText.startsWith(wanted) }
+                                // A named chapter can be reached by its name ("prologue").
+                                ?: chapterList.firstOrNull {
+                                    it.numberText.contains(jumpQuery.trim(), ignoreCase = true)
+                                }
                             if (target != null) {
                                 openChapter(target)
                                 showJump = false
@@ -710,7 +720,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        text = "Chapter ${chapter.numberText}",
+                        text = chapterHeading(chapter.numberText),
                         style = MaterialTheme.typography.bodyMedium,
                         color = Palette.Ink,
                         modifier = Modifier.weight(1f),
@@ -843,7 +853,7 @@ private fun ChapterCard(
                     )
                 } else {
                     Text(
-                        text = chapter.numberText.take(4),
+                        text = chapterBadge(chapter.numberText),
                         style = MaterialTheme.typography.labelMedium,
                         color = if (isResumePoint) Palette.OnAccent else Palette.Ink,
                     )
@@ -854,7 +864,7 @@ private fun ChapterCard(
 
             Column(Modifier.weight(1f).graphicsLayer { alpha = if (read) 0.62f else 1f }) {
                 Text(
-                    text = "Chapter ${chapter.numberText}",
+                    text = chapterHeading(chapter.numberText),
                     style = MaterialTheme.typography.titleMedium,
                     color = Palette.Ink,
                     maxLines = 1,
@@ -885,7 +895,7 @@ private fun ChapterCard(
                     onClick = onDownload,
                     size = 34.dp,
                     tint = Palette.InkSecondary,
-                    label = "Download chapter ${chapter.numberText}",
+                    label = "Download ${chapterHeading(chapter.numberText)}",
                 )
 
                 download.state == DownloadState.COMPLETE -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -895,7 +905,7 @@ private fun ChapterCard(
                         onClick = onDelete,
                         size = 34.dp,
                         tint = Palette.InkSecondary,
-                        label = "Delete chapter ${chapter.numberText}",
+                        label = "Delete ${chapterHeading(chapter.numberText)}",
                     )
                 }
 

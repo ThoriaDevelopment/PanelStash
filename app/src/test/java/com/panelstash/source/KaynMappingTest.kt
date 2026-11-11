@@ -20,7 +20,7 @@ class KaynMappingTest {
     private val seriesHtml = """
         <html><body>
         <script>self.__next_f.push([1,"1:\"${'$'}Sreact.fragment\"\n3:I[41165,[\"90401\",\"chunk.js\"],\"IndexPageSuspense\"]\n"])</script>
-        <script>self.__next_f.push([1,"a:[\"${'$'}\",\"${'$'}L7d\",null,{\"series\":{\"id\":\"kayn-s-31\",\"title\":\"The Supreme Demon Swordmaster\",\"slug\":\"the-supreme-demon-swordmaster\",\"urlSlug\":\"the-supreme-demon-swordmaster\",\"description\":\"He said \\\"it is over\\\" and left.\",\"coverImage\":\"/uploads/api/a6558a991173b4ba.png\",\"status\":\"ONGOING\",\"type\":\"MANHWA\"}}\n"])</script>
+        <script>self.__next_f.push([1,"a:[\"${'$'}\",\"${'$'}L7d\",null,{\"series\":{\"id\":\"kayn-s-31\",\"title\":\"The Supreme Demon Swordmaster\",\"slug\":\"the-supreme-demon-swordmaster\",\"urlSlug\":\"the-supreme-demon-swordmaster\",\"description\":\"He said \\\"it is over\\\" and left.\",\"coverImage\":\"/uploads/api/a6558a991173b4ba.png\",\"status\":\"ONGOING\",\"type\":\"MANHWA\",\"chapterCount\":120}}\n"])</script>
         <script>self.__next_f.push([1,"b:{\\\"series\\\":{\\\"id\\\":\\\"kayn-s-31\\\",\\\"title\\\":\\\"The Supreme Demon Swordmaster\\\",\\\"nsfw\\\":false},\\\"chapters\\\":[{\\\"id\\\":\\\"kayn-c-1135\\\",\\\"number\\\":1,\\\"title\\\":null,\\\"isLocked\\\":false,\\\"coinPrice\\\":0,\\\"hasAccess\\\":true},{\\\"id\\\":\\\"kayn-c-1136\\\",\\\"number\\\":2.5,\\\"title\\\":\\\"Extra\\\",\\\"isLocked\\\":true,\\\"coinPrice\\\":75,\\\"hasAccess\\\":false}]}\n"])</script>
         </body></html>
     """.trimIndent()
@@ -78,7 +78,40 @@ class KaynMappingTest {
         assertEquals("He said \"it is over\" and left.", series.description)
         assertEquals("https://kaynscans.com/uploads/api/a6558a991173b4ba.png", series.coverUrl)
         assertEquals("ONGOING", series.status)
+        // The tally, not the row count, is what says whether the streamed list is whole.
+        assertEquals(120, series.chapterCount)
     }
+
+    @Test
+    fun `a clipped payload is completed from the paged chapters`() {
+        // The page streams the first 100 rows only; the paged endpoint reaches the rest.
+        val payload = (1..100).map { chapter("kayn-c-$it", it.toDouble()) }
+        val paged = (80..120).reversed().map { chapter("kayn-c-$it", it.toDouble()) }
+
+        val combined = combineKaynChapters(payload, paged, declared = 120)
+
+        assertEquals(120, combined.size)
+        assertEquals(120, combined.map { it.remoteId }.distinct().size)
+        assertEquals((1..120).map { it.toDouble() }, combined.map { it.sortKey }.sortedBy { it })
+    }
+
+    @Test
+    fun `a complete payload is used as published`() {
+        val payload = (1..100).map { chapter("kayn-c-$it", it.toDouble()) }
+
+        // Nothing to page for when the count agrees with the rows.
+        assertEquals(100, combineKaynChapters(payload, emptyList(), declared = 100).size)
+    }
+
+    private fun chapter(id: String, number: Double) = SourceChapter(
+        remoteId = id,
+        numberText = formatNumber(number),
+        sortKey = number,
+        title = null,
+        language = "en",
+        pageCount = 0,
+        externalOnly = false,
+    )
 
     @Test
     fun `payload chapter list marks coin-gated chapters unreadable`() {

@@ -1464,6 +1464,17 @@ private fun SheetPanel(
     }
 }
 
+/**
+ * A chapter's heading. Numbered chapters read "Chapter 12"; a chapter the source named instead
+ * (a prologue, a side story) is shown under that name rather than as "Chapter Prologue".
+ */
+fun chapterHeading(numberText: String): String =
+    if (numberText.trim().toDoubleOrNull() != null) "Chapter $numberText" else numberText
+
+/** The short form a chapter row's round badge holds: the number, or a named chapter's initial. */
+fun chapterBadge(numberText: String): String =
+    if (numberText.trim().toDoubleOrNull() != null) numberText.take(4) else numberText.take(1)
+
 fun formatBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024L * 1024L -> "%.1f GB".format(bytes / (1024.0 * 1024.0 * 1024.0))
     bytes >= 1024L * 1024L -> "%.0f MB".format(bytes / (1024.0 * 1024.0))

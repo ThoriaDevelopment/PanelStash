@@ -145,6 +145,16 @@ interface ChapterDao {
     @Update
     suspend fun update(chapter: ChapterEntity)
 
+    /**
+     * A chapter list is written in one transaction rather than one row at a time: a long series
+     * is hundreds of rows, and one insert per row made the merged profile appear in slow steps.
+     */
+    @Insert
+    suspend fun insertAll(chapters: List<ChapterEntity>)
+
+    @Update
+    suspend fun updateAll(chapters: List<ChapterEntity>)
+
     @Query("SELECT * FROM chapter WHERE sourceId = :sourceId AND remoteId = :remoteId LIMIT 1")
     suspend fun byRemote(sourceId: String, remoteId: String): ChapterEntity?
 
@@ -192,7 +202,9 @@ interface ChapterDao {
 
     @Query(
         "SELECT * FROM chapter WHERE manhwaId = :manhwaId AND externalUrl IS NULL " +
-            "ORDER BY sortKey ASC LIMIT 1",
+            // A named chapter ("Side Story") has no sort key and must not be answered as the
+            // first one just because SQLite sorts NULL ahead of every number.
+            "ORDER BY CASE WHEN sortKey IS NULL THEN 1 ELSE 0 END, sortKey ASC LIMIT 1",
     )
     suspend fun firstChapter(manhwaId: Long): ChapterEntity?
 }

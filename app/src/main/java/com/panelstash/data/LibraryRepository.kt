@@ -11,6 +11,7 @@ import com.panelstash.data.db.ResumeEntity
 import com.panelstash.source.BrowseFilter
 import com.panelstash.source.BrowseSort
 import com.panelstash.source.Source
+import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
 import com.panelstash.source.SourceManhwa
 import com.panelstash.source.SourceRegistry
@@ -19,6 +20,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** One aggregate page: what was found, where each source resumes, and whether all are done. */
 data class BrowsePage(
@@ -36,6 +38,20 @@ data class SearchPage(
 
 /** Catalogue rows the reader never touched are dropped after this long. */
 private const val CATALOGUE_TTL_MS = 30L * 24 * 60 * 60 * 1000
+
+/**
+ * How long one source may take to answer a catalogue or search request before it is dropped from
+ * this page. Every source is asked at the same time, so without a limit the slowest site sets the
+ * wait for the whole screen — and a site that never answers held Browse for the full 30 s request
+ * timeout. A dropped source is not marked finished, so "load more" asks it again.
+ */
+private const val LIST_TIMEOUT_MS = 15_000L
+
+/** The same, for the searches that decide which sources carry an opened title. */
+private const val LINK_SEARCH_TIMEOUT_MS = 8_000L
+
+/** A ceiling on the whole "find it on another source" sweep, however many sources there are. */
+private const val MATCH_SWEEP_TIMEOUT_MS = 20_000L
 
 /** Reading order: numbered chapters by value, unnumbered ones after them. */
 private val CHAPTER_ORDER =
@@ -160,11 +176,13 @@ class LibraryRepository(
             val offset = offsets[source.id] ?: 0
             async {
                 val result = runCatching {
-                    if (query.isBlank()) {
-                        source.browse(discoverySort(source), null, BrowseFilter.None, offset, limit)
-                    } else {
-                        source.search(query, offset, limit)
-                    }
+                    withTimeoutOrNull(LIST_TIMEOUT_MS) {
+                        if (query.isBlank()) {
+                            source.browse(discoverySort(source), null, BrowseFilter.None, offset, limit)
+                        } else {
+                            source.search(query, offset, limit)
+                        }
+                    } ?: throw SourceError.Transient()
                 }
                 Triple(source, offset, result)
             }
@@ -203,7 +221,15 @@ class LibraryRepository(
         val pages = sources.all.map { source ->
             val offset = offsets[source.id] ?: 0
             async {
-                Triple(source, offset, runCatching { source.browse(sort, tagId, filter, offset, limit) })
+                Triple(
+                    source,
+                    offset,
+                    runCatching {
+                        withTimeoutOrNull(LIST_TIMEOUT_MS) {
+                            source.browse(sort, tagId, filter, offset, limit)
+                        } ?: throw SourceError.Transient()
+                    },
+                )
             }
         }.awaitAll()
 
@@ -259,14 +285,12 @@ class LibraryRepository(
     fun allSources(): List<Source> = sources.everything
 
     /**
-     * Which source's copy of a chapter wins when two of them publish the same number. MangaDex
-     * first, Asura Scans second, and then the order the app registers the rest in.
+     * Which source's copy of a chapter wins when two of them publish the same number. The
+     * registry's registration order is the precedence, so there is one list to change rather than
+     * a hardcoded pair here that can drift from it. An unknown source ranks last.
      */
-    fun sourceRank(sourceId: String): Int = when (sourceId) {
-        "mangadex" -> 0
-        "asurascans" -> 1
-        else -> 2 + sources.everything.indexOfFirst { it.id == sourceId }.coerceAtLeast(0)
-    }
+    fun sourceRank(sourceId: String): Int =
+        sources.everything.indexOfFirst { it.id == sourceId }.takeIf { it >= 0 } ?: Int.MAX_VALUE
 
     suspend fun manhwaByRemote(sourceId: String, remoteId: String): ManhwaEntity? =
         manhwaDao.byRemote(sourceId, remoteId)
@@ -283,16 +307,23 @@ class LibraryRepository(
     ): Pair<Source, SourceManhwa>? {
         val wanted = normaliseTitle(title)
         if (wanted.isBlank()) return null
-        for (source in sources.all) {
-            if (source.id in excluding) continue
-            val candidates = runCatching { source.search(title, 0, 20) }.getOrNull().orEmpty()
-            // Only the same title counts. A source's search happily returns a spin-off for its
-            // parent, so a partial match would open "Solo Leveling: Arise" in place of "Solo
-            // Leveling" — a different series with a different reader.
-            val match = candidates.firstOrNull { normaliseTitle(it.title) == wanted }
-            if (match != null) return source to match
+        // Sources are tried in precedence order and the first hit wins, but the sweep as a whole
+        // is capped: a site that hangs must not turn "this title is unreadable here" into a
+        // minute of waiting before another source is opened.
+        return withTimeoutOrNull(MATCH_SWEEP_TIMEOUT_MS) {
+            for (source in sources.all) {
+                if (source.id in excluding) continue
+                val candidates = runCatching {
+                    withTimeoutOrNull(LINK_SEARCH_TIMEOUT_MS) { source.search(title, 0, 20) }
+                }.getOrNull().orEmpty()
+                // Only the same title counts. A source's search happily returns a spin-off for
+                // its parent, so a partial match would open "Solo Leveling: Arise" in place of
+                // "Solo Leveling" — a different series with a different reader.
+                val match = candidates.firstOrNull { normaliseTitle(it.title) == wanted }
+                if (match != null) return@withTimeoutOrNull source to match
+            }
+            null
         }
-        return null
     }
 
     /**
@@ -319,9 +350,9 @@ class LibraryRepository(
                 async {
                     // The site's own search is the way in; the alternates are what make a hit on
                     // a differently-titled copy count as the same series.
-                    val candidates = runCatching { source.search(query, 0, 20) }
-                        .getOrNull()
-                        .orEmpty()
+                    val candidates = runCatching {
+                        withTimeoutOrNull(LINK_SEARCH_TIMEOUT_MS) { source.search(query, 0, 20) }
+                    }.getOrNull().orEmpty()
                     candidates.firstOrNull { sameTitle(names, listOf(it.title) + it.aliases) }
                         ?.let { source to it }
                 }
@@ -353,34 +384,40 @@ class LibraryRepository(
         val source = sources.get(manhwa.sourceId)
         val chapters = source.chapters(manhwa.remoteId, language = "en")
         val now = System.currentTimeMillis()
+        // Read the stored rows once and write the differences in two batches. A per-chapter
+        // lookup plus a per-chapter insert is two hundred transactions for a two-hundred-chapter
+        // series, and the merged profile visibly filled in one row at a time because of it.
+        val existing = chapterDao.listForManhwa(manhwaId).associateBy { it.remoteId }
+        val inserts = mutableListOf<ChapterEntity>()
+        val updates = mutableListOf<ChapterEntity>()
         for (chapter in chapters) {
-            val existing = chapterDao.byRemote(manhwa.sourceId, chapter.remoteId)
-            if (existing == null) {
-                chapterDao.insert(
-                    ChapterEntity(
-                        manhwaId = manhwaId,
-                        sourceId = manhwa.sourceId,
-                        remoteId = chapter.remoteId,
-                        numberText = chapter.numberText,
-                        sortKey = chapter.sortKey,
-                        title = chapter.title,
-                        language = chapter.language,
-                        pageCount = chapter.pageCount,
-                        externalUrl = chapter.externalUrl,
-                    ),
+            val held = existing[chapter.remoteId]
+            if (held == null) {
+                inserts += ChapterEntity(
+                    manhwaId = manhwaId,
+                    sourceId = manhwa.sourceId,
+                    remoteId = chapter.remoteId,
+                    numberText = chapter.numberText,
+                    sortKey = chapter.sortKey,
+                    title = chapter.title,
+                    language = chapter.language,
+                    pageCount = chapter.pageCount,
+                    externalUrl = chapter.externalUrl,
                 )
             } else {
-                chapterDao.update(
-                    existing.copy(
-                        numberText = chapter.numberText,
-                        sortKey = chapter.sortKey,
-                        title = chapter.title,
-                        pageCount = chapter.pageCount,
-                        externalUrl = chapter.externalUrl,
-                    ),
+                val next = held.copy(
+                    numberText = chapter.numberText,
+                    sortKey = chapter.sortKey,
+                    title = chapter.title,
+                    pageCount = chapter.pageCount,
+                    externalUrl = chapter.externalUrl,
                 )
+                // Read state lives on these rows; an unchanged row is left alone entirely.
+                if (next != held) updates += next
             }
         }
+        if (inserts.isNotEmpty()) chapterDao.insertAll(inserts)
+        if (updates.isNotEmpty()) chapterDao.updateAll(updates)
         manhwaDao.update(manhwa.copy(lastFetchedAt = now))
         return chapters.size
     }
@@ -463,6 +500,31 @@ class LibraryRepository(
             .filter { it.externalUrl == null }
         val index = merged.indexOfFirst { it.id == chapterId }
         return if (index >= 0 && index + 1 < merged.size) merged[index + 1] else null
+    }
+
+    /**
+     * Other readable copies of one chapter number across the title's sources, best first.
+     *
+     * The merged profile keeps one copy of each chapter number, so the copy it shows is not always
+     * the copy that still works: a source can delete a chapter's images, or lock it, while the row
+     * stays in the list until the next refresh. This is the way round that — the reader falls back
+     * to a sibling source's upload of the same chapter instead of telling the reader it is gone.
+     */
+    suspend fun alternativeCopies(
+        manhwaIds: List<Long>,
+        numberText: String,
+        excludingChapterId: Long,
+        rank: (String) -> Int = { sourceRank(it) },
+    ): List<Pair<ChapterEntity, ManhwaEntity>> {
+        val key = numberText.trim()
+        val copies = chapterDao.listForManhwas(manhwaIds)
+            .filter {
+                it.id != excludingChapterId &&
+                    it.externalUrl == null &&
+                    it.numberText.trim() == key
+            }
+            .sortedBy { rank(it.sourceId) }
+        return copies.mapNotNull { copy -> manhwaDao.byId(copy.manhwaId)?.let { copy to it } }
     }
 
     /** True when any copy of the title has something that can actually be read in the app. */

@@ -134,11 +134,26 @@ class MangaDexMappingTest {
     }
 
     @Test
-    fun `chapters without a number are dropped`() {
+    fun `a chapter without a number keeps its title`() {
+        // MangaDex does not always number a prologue or a bonus entry; its title still names it.
         val payload = """
             {"result":"ok","data":[{
               "id":"no-number","type":"chapter",
               "attributes":{"title":"Extras","translatedLanguage":"en","pages":10}
+            }]}
+        """.trimIndent()
+        val chapter = json.decodeFromString<ChapterListResponse>(payload).data.single().toSourceChapter()!!
+
+        assertEquals("Extras", chapter.numberText)
+        assertNull(chapter.sortKey)
+    }
+
+    @Test
+    fun `a chapter with neither a number nor a name is dropped`() {
+        val payload = """
+            {"result":"ok","data":[{
+              "id":"bare","type":"chapter",
+              "attributes":{"translatedLanguage":"en","pages":10}
             }]}
         """.trimIndent()
         val dto = json.decodeFromString<ChapterListResponse>(payload).data.single()

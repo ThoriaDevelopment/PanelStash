@@ -26,7 +26,12 @@ internal data class KaynSeries(
     val description: String?,
     val coverUrl: String?,
     val status: String?,
-    /** The full chapter list as published on the page, or empty when the payload omitted it. */
+    /**
+     * The tally the page publishes for the series. The chapter array it streams stops at the
+     * first 100 rows, so this is what tells a complete list from a clipped one.
+     */
+    val chapterCount: Int?,
+    /** The chapter list as published on the page, which can be clipped or empty. */
     val chapters: List<SourceChapter>,
 )
 
@@ -46,6 +51,7 @@ internal fun parseKaynSeries(html: String, seriesId: String): KaynSeries {
         description = series.stringOrNull("description")?.trim()?.takeIf { it.isNotBlank() },
         coverUrl = series.stringOrNull("coverImage")?.let(::kaynUrl),
         status = series.stringOrNull("status"),
+        chapterCount = series.numberOrNull("chapterCount")?.toInt(),
         chapters = chaptersIn(stream, id),
     )
 }
@@ -88,14 +94,18 @@ private fun chaptersIn(stream: String, seriesId: String): List<SourceChapter> {
 private fun chapterOf(element: JsonElement): SourceChapter? {
     val chapter = element as? JsonObject ?: return null
     val id = chapter.stringOrNull("id") ?: return null
-    val number = chapter.numberOrNull("number") ?: return null
+    val title = chapter.stringOrNull("title")
+    // A chapter the page leaves unnumbered keeps its own name, if it has one.
+    val label = chapter.numberOrNull("number")?.let { ChapterLabel(formatNumber(it), it) }
+        ?: chapterLabel(title.orEmpty())
+        ?: return null
     val locked = chapter.flagOrNull("isLocked") ?: false
     val accessible = chapter.flagOrNull("hasAccess") ?: true
     return SourceChapter(
         remoteId = id,
-        numberText = formatNumber(number),
-        sortKey = number,
-        title = chapter.stringOrNull("title"),
+        numberText = label.numberText,
+        sortKey = label.sortKey,
+        title = title,
         language = "en",
         // The page count arrives with the page images, on first read.
         pageCount = 0,

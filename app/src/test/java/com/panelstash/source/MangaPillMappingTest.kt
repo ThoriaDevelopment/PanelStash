@@ -143,6 +143,21 @@ class MangaPillMappingTest {
     }
 
     @Test
+    fun `a prologue is kept as a named chapter and reads first`() {
+        val payload = """
+            <div id="chapters" class="p-3">
+              <a class="border" href="/chapters/6372-10186000/solo-glitch-player-chapter-186" title="Solo Bug Player Chapter 186">Chapter 186</a>
+              <a class="border" href="/chapters/6372-00000000/solo-glitch-player-prologue" title="Solo Bug Player Prologue">Prologue</a>
+            </div>
+        """.trimIndent()
+
+        val chapters = dedupeChapters(parseMangaPillChapters(payload))
+
+        assertEquals(listOf("Prologue", "186"), chapters.map { it.numberText })
+        assertEquals("6372-00000000/solo-glitch-player-prologue", chapters.first().remoteId)
+    }
+
+    @Test
     fun `genres come from the filter form without duplicates`() {
         val genres = parseMangaPillGenres(genreFormPayload)
 

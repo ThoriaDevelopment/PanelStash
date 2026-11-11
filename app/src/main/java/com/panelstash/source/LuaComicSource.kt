@@ -184,11 +184,15 @@ internal fun LuaChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {
     if (slug.isBlank()) return null
     val number = name?.let { LUA_CHAPTER_NUMBER.find(it)?.groupValues?.get(1) }
         ?: slug.removePrefix("chapter-").takeIf { it.matches(Regex("""[0-9][0-9.]*""")) }
+    // A chapter the site names instead of numbering (a prologue, a side story) keeps its name.
+    val label = number?.let { ChapterLabel(it, it.toDoubleOrNull()) }
+        ?: chapterLabel(name.orEmpty())
+        ?: chapterLabel(slug.replace('-', ' '))
         ?: return null
     return SourceChapter(
         remoteId = "$seriesSlug$LUA_SEPARATOR$slug",
-        numberText = number,
-        sortKey = chapterSortKey(number),
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = title?.trim()?.takeIf { it.isNotEmpty() },
         language = "en",
         // The count arrives with the images on first read.

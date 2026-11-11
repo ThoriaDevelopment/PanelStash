@@ -301,10 +301,13 @@ internal fun parseArenaSeries(html: String, remoteId: String): SourceManhwa {
 /**
  * One row: a numbered list item around the chapter link and its label. The site writes newer
  * chapters as `{slug}-chapter-{n}` and older ones as `{slug}-{n}`, so the link is kept whole and
- * the number is read from the label rather than reconstructed.
+ * the number is read from the label rather than reconstructed. The label is not assumed to be
+ * numbered: the rows the site files as a prologue or an extra carry their own text there.
  */
 private val ARENA_CHAPTER = Regex(
-    """<li data-num="[^"]*">\s*<div class="chbox">\s*<div class="eph-num">\s*<a href="https://arenascan\.com/([^"]+)">\s*<span class="chapternum">\s*Chapter\s*([0-9][0-9.]*)""",
+    // The first chapter's row is the only one that carries a second attribute
+    // (`class="first-chapter"`), and requiring the tag to end after `data-num` used to drop it.
+    """<li data-num="[^"]*"[^>]*>\s*<div class="chbox">\s*<div class="eph-num">\s*<a href="https://arenascan\.com/([^"]+)">\s*<span class="chapternum">\s*([^<]{0,80})""",
     RegexOption.DOT_MATCHES_ALL,
 )
 
@@ -312,12 +315,13 @@ internal fun parseArenaChapters(html: String): List<SourceChapter> {
     val chapters = mutableListOf<SourceChapter>()
     for (row in ARENA_CHAPTER.findAll(html)) {
         val path = row.groupValues[1].trim('/')
-        val number = row.groupValues[2]
         if (path.isEmpty()) continue
+        // The label is read as written, so a prologue or a side story is listed beside the run.
+        val label = chapterLabel(row.groupValues[2]) ?: chapterLabel(path.replace('-', ' ')) ?: continue
         chapters += SourceChapter(
             remoteId = path,
-            numberText = number,
-            sortKey = chapterSortKey(number),
+            numberText = label.numberText,
+            sortKey = label.sortKey,
             title = null,
             language = "en",
             // The count arrives with the images on first read.

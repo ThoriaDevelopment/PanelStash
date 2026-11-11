@@ -1,5 +1,11 @@
 package com.panelstash.source
 
+/**
+ * The pseudo-source id Browse and Search use for "every installed source at once". It is a
+ * catalogue-wide view, not a real source, so no [Source] ever declares this id.
+ */
+const val ALL_SOURCES = "all"
+
 /** A manhwa as delivered by a source, before it is stored locally. */
 data class SourceManhwa(
     val remoteId: String,
@@ -171,6 +177,62 @@ interface Source {
 
 /** Derives a sort key from a chapter number string: "10.5" -> 10.5, "Extra" -> null. */
 fun chapterSortKey(numberText: String): Double? = numberText.trim().toDoubleOrNull()
+
+/**
+ * A chapter's place on a profile: the text a reader sees ("12", "12.5", "Prologue") and where it
+ * sorts against its neighbours.
+ */
+data class ChapterLabel(val numberText: String, val sortKey: Double?)
+
+private val NUMBERED_LABEL = Regex(
+    """\b(?:chapter|chap\.?|ch\.?|episode|ep\.?)\s*#?\s*([0-9]+(?:\.[0-9]+)?)""",
+    RegexOption.IGNORE_CASE,
+)
+private val BARE_NUMBER = Regex("""#?\s*([0-9]+(?:\.[0-9]+)?)""")
+
+/** A prologue is read before chapter 1, whatever number a site gives it. */
+private val PROLOGUE_LABEL = Regex("""\b(?:prologue|prolog|preface|prelude)\b""", RegexOption.IGNORE_CASE)
+
+/** The chapters a site publishes beside the numbered run. */
+private val NAMED_LABEL = Regex(
+    """\b(?:epilogues?|epilogs?|afterwords?|extras?|bonus|side[\s_-]*stor(?:y|ies)|specials?|interludes?|recaps?|omake|one[\s_-]*shots?|announcements?|notices?)\b(?:\s*#?\s*[0-9]+(?:\.[0-9]+)?)?""",
+    RegexOption.IGNORE_CASE,
+)
+
+/**
+ * Reads the label a source puts on a chapter into a number and a sort key.
+ *
+ * Most chapters are numbered, and a site writes that number in any of a few ways ("12",
+ * "Chapter 12", "Ch. 12.5"), so all of those are recognised. The rest are real chapters a site
+ * publishes without a number — a prologue, a side story, an epilogue — which are kept rather than
+ * dropped, because a reader has to be able to reach them. Their own label is the number text,
+ * since that is what the profile should show: a prologue sorts in front of chapter 1, and every
+ * other named chapter sorts after the numbered run, where a null key already puts it.
+ *
+ * Anything else is not a chapter and returns null, so a stray row is still skipped.
+ */
+fun chapterLabel(raw: String): ChapterLabel? {
+    val text = raw.trim()
+    if (text.isEmpty()) return null
+    NUMBERED_LABEL.find(text)?.groupValues?.get(1)?.let { number ->
+        return ChapterLabel(number, number.toDoubleOrNull())
+    }
+    if (BARE_NUMBER.matchEntire(text) != null) {
+        val number = text.trimStart('#').trim()
+        return ChapterLabel(number, number.toDoubleOrNull())
+    }
+    PROLOGUE_LABEL.find(text)?.let { return ChapterLabel(titleCase(it.value), 0.0) }
+    NAMED_LABEL.find(text)?.let { return ChapterLabel(titleCase(it.value), null) }
+    return null
+}
+
+/** "side-story 2" -> "Side Story 2", so two sites spelling a label differently still match. */
+private fun titleCase(value: String): String = value
+    .replace(Regex("""[\s_-]+"""), " ")
+    .trim()
+    .split(' ')
+    .filter { it.isNotEmpty() }
+    .joinToString(" ") { word -> word.lowercase().replaceFirstChar { it.titlecase() } }
 
 /**
  * Collapses duplicate chapter numbers (same number uploaded by several groups) into one.

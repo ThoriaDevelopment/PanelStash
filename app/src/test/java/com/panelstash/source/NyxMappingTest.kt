@@ -111,8 +111,15 @@ class NyxMappingTest {
     }
 
     @Test
-    fun `chapters without a number are dropped`() {
-        assertNull(NyxChapterDto(slug = "extras", number = null).toSourceChapter("x"))
+    fun `a chapter without a number keeps the name it was given`() {
+        // The API leaves a bonus chapter unnumbered; the slug still names it, so it is listed
+        // after the numbered run instead of vanishing from the profile.
+        val extras = NyxChapterDto(slug = "extras", number = null).toSourceChapter("x")!!
+        assertEquals("Extras", extras.numberText)
+        assertNull(extras.sortKey)
+
+        // Nothing in the payload places this one, so it is still skipped rather than invented.
+        assertNull(NyxChapterDto(slug = "q1w2", number = null).toSourceChapter("x"))
     }
 
     @Test

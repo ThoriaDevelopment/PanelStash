@@ -43,20 +43,25 @@ internal fun MangaDto.sourceGenres(): List<SourceGenre> =
         }
 
 /**
- * Returns null only for chapters that cannot be represented at all: no number, unavailable, or
- * zero pages with nowhere to send the reader. A chapter hosted on another site keeps its
- * [SourceChapter.externalUrl], so licensed English chapters can be listed as bookmarks instead
- * of disappearing from the profile.
+ * Returns null only for chapters that cannot be represented at all: no number and no name,
+ * unavailable, or zero pages with nowhere to send the reader. A chapter hosted on another site
+ * keeps its [SourceChapter.externalUrl], so licensed English chapters can be listed as bookmarks
+ * instead of disappearing from the profile.
  */
 internal fun ChapterDto.toSourceChapter(): SourceChapter? {
-    val number = attributes.chapter?.trim() ?: return null
     if (attributes.isUnavailable) return null
     val externalUrl = attributes.externalUrl
     if (externalUrl == null && attributes.pages <= 0) return null
+    // MangaDex usually numbers a prologue "0", but not always: the entry can arrive with no
+    // number at all and the name in its title, and it is still a chapter of the series.
+    val number = attributes.chapter?.trim()?.takeIf { it.isNotEmpty() }
+    val label = number?.let { chapterLabel(it) ?: ChapterLabel(it, chapterSortKey(it)) }
+        ?: chapterLabel(attributes.title.orEmpty())
+        ?: return null
     return SourceChapter(
         remoteId = id,
-        numberText = number,
-        sortKey = chapterSortKey(number),
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = attributes.title,
         language = attributes.translatedLanguage,
         pageCount = attributes.pages,

@@ -14,9 +14,21 @@ import coil3.fetch.SourceFetchResult
 import coil3.request.ImageRequest
 import coil3.request.Options
 import coil3.request.crossfade
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 /** As tall as a bitmap may be before a decode starts throwing pixels away. */
 private const val MAX_DECODE_HEIGHT = 16_384
+
+/**
+ * Bands that may decode at the same time.
+ *
+ * Every band of a page is its own request, so a 20-band strip used to start 20 decodes in the same
+ * frame: 20 copies of the encoded bytes plus 20 bitmaps, which is the memory spike that turned
+ * into jank and, on a small heap, into bands that never appeared. Decoding is local work once the
+ * bytes are cached, so a handful at a time is both fast enough and far kinder to the heap.
+ */
+private val bandSlots = Semaphore(permits = 4)
 
 /**
  * Decodes one horizontal band of a very tall page.
@@ -36,13 +48,13 @@ internal class PageBandDecoder(
 ) : Decoder {
 
     @Suppress("DEPRECATION") // The byte array overload is the only one below Android 12.
-    override suspend fun decode(): DecodeResult {
+    override suspend fun decode(): DecodeResult = bandSlots.withPermit {
         val bytes = source.source().use { it.readByteArray() }
         // WebP only became region-decodable in Android 12; an older phone gets a sampled whole
         // image with its band cut out instead, which is soft but not blank.
         val region = runCatching {
             BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
-        }.getOrNull() ?: return decodeWithoutRegions(bytes)
+        }.getOrNull() ?: return@withPermit decodeWithoutRegions(bytes)
         try {
             val top = (region.height.toLong() * band / bands).toInt()
             // One row of overlap: a band that rounds to a pixel less than its share of the page
@@ -54,7 +66,7 @@ internal class PageBandDecoder(
             val rect = Rect(0, top, region.width, bottom.coerceAtLeast(top + 1))
             val bitmap = region.decodeRegion(rect, BitmapFactory.Options())
                 ?: throw IllegalStateException("Band $band of $bands decoded empty")
-            return DecodeResult(bitmap.asImage(), false)
+            DecodeResult(bitmap.asImage(), false)
         } finally {
             region.recycle()
         }

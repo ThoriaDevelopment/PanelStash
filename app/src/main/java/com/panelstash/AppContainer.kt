@@ -60,20 +60,25 @@ class AppContainer(context: Context) {
      */
     private val apiClient = Network.apiClient()
 
+    /**
+     * Registration order is precedence: when two sources publish the same chapter, the earlier
+     * one wins. It also orders every list the UI builds from the registry, so a source's position
+     * here is the position the reader sees.
+     */
     val sources = SourceRegistry(
         sources = listOf(
             MangaDexSource(apiClient, SourceGate()),
             AsuraScansSource(apiClient, SourceGate()),
+            ArenaScansSource(apiClient, SourceGate()),
+            FlameComicsSource(apiClient, SourceGate()),
+            LuaComicSource(apiClient, SourceGate()),
             VortexScansSource(apiClient, SourceGate()),
             NyxScansSource(apiClient, SourceGate()),
             OrionScansSource(apiClient, SourceGate()),
             KaynScansSource(apiClient, SourceGate()),
-            FlameComicsSource(apiClient, SourceGate()),
+            MgekoSource(apiClient, SourceGate()),
             WeebCentralSource(apiClient, SourceGate()),
             MangaPillSource(apiClient, SourceGate()),
-            ArenaScansSource(apiClient, SourceGate()),
-            LuaComicSource(apiClient, SourceGate()),
-            MgekoSource(apiClient, SourceGate()),
         ),
         // Read on every access, so switching a source off takes effect without a restart.
         disabled = { settings.current.disabledSourceIds },
@@ -91,6 +96,10 @@ class AppContainer(context: Context) {
     /**
      * Caches are sized explicitly rather than left to the defaults: reading and browsing are
      * image-bound, and a chapter that has been seen once should come back from disk instantly.
+     *
+     * Coil 3 already writes every network response to the disk cache regardless of its
+     * Cache-Control header, which is what a reader wants: page bytes are immutable, and every band
+     * of a tall page reads the same encoded file.
      */
     val imageLoader: ImageLoader = ImageLoader.Builder(appContext)
         .components {

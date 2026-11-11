@@ -51,6 +51,21 @@ class VortexMappingTest {
     }
 
     @Test
+    fun `a chapter the API leaves unnumbered keeps its title`() {
+        val payload = """
+            {"post":{"id":1,"slug":"s","chapters":[
+              {"slug":"prologue","number":null,"title":"Prologue"},
+              {"slug":"chapter-1","number":1,"title":null}
+            ]}}
+        """.trimIndent()
+
+        val chapters = json.decodeFromString<VortexChaptersResponse>(payload).post!!.chapters
+            .mapNotNull { it.toSourceChapter("s") }
+
+        assertEquals(listOf("Prologue", "1"), dedupeChapters(chapters).map { it.numberText })
+    }
+
+    @Test
     fun `coin-locked and early-access chapters are never offered`() {
         val chapters = json.decodeFromString<VortexChaptersResponse>(payload).post!!.chapters
             .mapNotNull { it.toSourceChapter("became-a-medieval-fantasy-wizard") }

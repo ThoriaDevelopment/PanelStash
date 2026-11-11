@@ -116,6 +116,20 @@ class LuaComicMappingTest {
     }
 
     @Test
+    fun `a chapter named instead of numbered keeps its name`() {
+        val payload = """
+            {"data": [
+              {"chapter_name": "Prologue", "chapter_slug": "prologue", "price": 0},
+              {"chapter_name": "Chapter 1", "chapter_slug": "chapter-1", "price": 0}
+            ]}
+        """.trimIndent()
+        val parsed = json.decodeFromString<LuaChapterQueryResponse>(payload).data
+            .mapNotNull { it.toSourceChapter("the-scarred-young-masters-maid") }
+
+        assertEquals(listOf("Prologue", "1"), dedupeChapters(parsed).map { it.numberText })
+    }
+
+    @Test
     fun `chapter ids round-trip through the reader address`() {
         assertEquals(
             "the-scarred-young-masters-maid" to "chapter-10",

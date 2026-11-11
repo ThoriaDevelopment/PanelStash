@@ -200,11 +200,16 @@ internal fun NyxPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
 )
 
 internal fun NyxChapterDto.toSourceChapter(seriesSlug: String): SourceChapter? {
-    val number = number ?: return null
+    // A numbered chapter first; a chapter the API leaves unnumbered keeps the name it was given
+    // ("Prologue", "Side Story 2") instead of disappearing from the profile.
+    val label = number?.let { ChapterLabel(formatNumber(it), it) }
+        ?: chapterLabel(title.orEmpty())
+        ?: chapterLabel(slug.replace('-', ' '))
+        ?: return null
     return SourceChapter(
         remoteId = "$seriesSlug|$slug",
-        numberText = formatNumber(number),
-        sortKey = number,
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = title?.takeIf { it.isNotBlank() },
         language = "en",
         // The count arrives with the page images, on first read.

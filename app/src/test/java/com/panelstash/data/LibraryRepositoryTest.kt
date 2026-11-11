@@ -1,6 +1,7 @@
 package com.panelstash.data
 
 import com.panelstash.data.db.ChapterDao
+import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.DownloadDao
 import com.panelstash.data.db.FollowDao
 import com.panelstash.data.db.ManhwaDao
@@ -40,6 +41,7 @@ class LibraryRepositoryTest {
 
     private lateinit var db: PanelStashDatabase
     private lateinit var manhwaDao: ManhwaDao
+    private lateinit var chapterDao: ChapterDao
     private var nextId = 1L
     private val stored = mutableMapOf<Long, ManhwaEntity>()
 
@@ -48,7 +50,8 @@ class LibraryRepositoryTest {
         db = mockk()
         manhwaDao = mockk()
         every { db.manhwaDao() } returns manhwaDao
-        every { db.chapterDao() } returns mockk<ChapterDao>(relaxed = true)
+        chapterDao = mockk<ChapterDao>(relaxed = true)
+        every { db.chapterDao() } returns chapterDao
         every { db.resumeDao() } returns mockk<ResumeDao>(relaxed = true)
         every { db.followDao() } returns mockk<FollowDao>(relaxed = true)
         every { db.readLaterDao() } returns mockk<ReadLaterDao>(relaxed = true)
@@ -180,11 +183,44 @@ class LibraryRepositoryTest {
     }
 
     @Test
+    fun `another source's copy of a chapter is offered when the listed one has no pages`() = runBlocking {
+        val asura = FakeSource(id = "asura")
+        val dex = FakeSource(id = "md")
+        val listedOn = ManhwaEntity(id = 7, sourceId = "asura", remoteId = "overgeared", title = "Overgeared")
+        val storedOn = ManhwaEntity(id = 8, sourceId = "md", remoteId = "ulid", title = "Overgeared")
+        stored[7] = listedOn
+        stored[8] = storedOn
+        val listed = chapter(1, manhwaId = 7, sourceId = "asura", remoteId = "chapter-0", number = "0")
+        val sibling = chapter(2, manhwaId = 8, sourceId = "md", remoteId = "chapter-uuid", number = "0")
+        // A licensed chapter links to a publisher, so it can never stand in for a readable one.
+        val licensed = chapter(3, manhwaId = 8, sourceId = "md", remoteId = "licensed", number = "0")
+            .copy(externalUrl = "https://publisher.example/chapter-0")
+        coEvery { chapterDao.listForManhwas(listOf(7L, 8L)) } returns listOf(listed, sibling, licensed)
+
+        val copies = repository(asura, dex)
+            .alternativeCopies(listOf(7L, 8L), numberText = "0", excludingChapterId = 1L)
+
+        // The copy that was clicked is excluded, and only the readable sibling is left.
+        assertEquals(listOf(2L), copies.map { it.first.id })
+        assertEquals(listOf(8L), copies.map { it.second.id })
+    }
+
+    @Test
     fun `a title no other source names exactly is left unmatched`() = runBlocking {
         val vortex = FakeSource(id = "vortex", searchHits = listOf(manhwa("Solo Leveling: Arise")))
 
         assertNull(repository(vortex).findOnOtherSource("Solo Leveling", excluding = setOf("md")))
     }
+
+    private fun chapter(id: Long, manhwaId: Long, sourceId: String, remoteId: String, number: String) =
+        ChapterEntity(
+            id = id,
+            manhwaId = manhwaId,
+            sourceId = sourceId,
+            remoteId = remoteId,
+            numberText = number,
+            sortKey = number.toDoubleOrNull(),
+        )
 
     private fun manhwa(remoteId: String) = SourceManhwa(
         remoteId = remoteId,

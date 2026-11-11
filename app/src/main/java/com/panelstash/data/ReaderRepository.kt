@@ -7,6 +7,8 @@ import com.panelstash.download.DownloadStore
 import com.panelstash.source.SourceRegistry
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 sealed interface ReaderPage {
@@ -55,6 +57,13 @@ class ReaderRepository(
 
     private val cache = LinkedHashMap<Long, Entry>()
 
+    /**
+     * One resolution per chapter at a time. The reader opening a chapter and the prefetch of the
+     * chapter after it can both ask for the same pages, and each used to resolve them: two rounds
+     * of requests for one list. The second caller now waits and shares the answer.
+     */
+    private val locks = mutableMapOf<Long, Mutex>()
+
     suspend fun pages(chapter: ChapterEntity, manhwa: ManhwaEntity): List<ReaderPage> {
         // A downloaded copy is checked before the cache, so finishing a download takes effect on
         // the very next open rather than after the cached page list expires.
@@ -70,21 +79,33 @@ class ReaderRepository(
             }
         }
 
-        cache[chapter.id]?.let { entry ->
-            if (clock() - entry.at < CACHE_TTL_MS) return entry.pages
-            cache.remove(chapter.id)
-        }
+        cached(chapter.id)?.let { return it }
 
-        val pages = resolveRemote(chapter, manhwa)
-        cache[chapter.id] = Entry(pages, clock())
-        if (cache.size > CACHE_LIMIT) cache.remove(cache.keys.first())
-        return pages
+        val lock = synchronized(locks) {
+            // Only needed while callers are waiting on it, so the map is dropped once it is large.
+            if (locks.size > LOCK_LIMIT) locks.clear()
+            locks.getOrPut(chapter.id) { Mutex() }
+        }
+        return lock.withLock {
+            cached(chapter.id) ?: resolveRemote(chapter, manhwa).also { pages ->
+                cache[chapter.id] = Entry(pages, clock())
+                if (cache.size > CACHE_LIMIT) cache.remove(cache.keys.first())
+            }
+        }
+    }
+
+    private fun cached(chapterId: Long): List<ReaderPage>? {
+        val entry = cache[chapterId] ?: return null
+        if (clock() - entry.at < CACHE_TTL_MS) return entry.pages
+        cache.remove(chapterId)
+        return null
     }
 
     /** Drops the cached page list for a chapter, e.g. after its download was deleted. */
     fun invalidate(chapterId: Long) {
         cache.remove(chapterId)
     }
+
 
     private suspend fun resolveRemote(chapter: ChapterEntity, manhwa: ManhwaEntity): List<ReaderPage> {
         val source = sources.get(manhwa.sourceId)
@@ -94,6 +115,9 @@ class ReaderRepository(
 
     private companion object {
         const val CACHE_TTL_MS = 10 * 60 * 1000L
-        const val CACHE_LIMIT = 8
+
+        /** Chapters whose page list is remembered, so stepping between them stays a cache hit. */
+        const val CACHE_LIMIT = 16
+        const val LOCK_LIMIT = 64
     }
 }

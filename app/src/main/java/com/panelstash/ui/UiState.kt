@@ -12,8 +12,11 @@ import com.panelstash.source.Source
 import com.panelstash.source.SourceCapabilities
 import com.panelstash.source.SourceGenre
 
-/** A source id that means "every installed source", used by Browse and Search. */
-const val ALL_SOURCES = "all"
+/**
+ * A source id that means "every installed source", used by Browse and Search. Defined beside
+ * [Source] because storage defaults to it too; kept here so screens import it from the UI package.
+ */
+const val ALL_SOURCES = com.panelstash.source.ALL_SOURCES
 
 /**
  * Two top-level destinations. Search, a manhwa profile, the reader and settings are pushed on top
@@ -36,9 +39,10 @@ enum class LibrarySection(val label: String) {
 }
 
 data class BrowseState(
-    val sourceId: String = "mangadex",
-    val sourceName: String = "MangaDex",
-    val capabilities: SourceCapabilities = SourceCapabilities(),
+    // The whole catalogue is the default view, so no single site decides what Browse shows.
+    val sourceId: String = ALL_SOURCES,
+    val sourceName: String = "All sources",
+    val capabilities: SourceCapabilities = SourceCapabilities(status = true),
     val sources: List<Source> = emptyList(),
     val sort: BrowseSort = BrowseSort.LATEST,
     val filter: BrowseFilter = BrowseFilter.None,

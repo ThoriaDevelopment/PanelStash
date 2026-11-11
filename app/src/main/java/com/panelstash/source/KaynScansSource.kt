@@ -83,9 +83,15 @@ class KaynScansSource(
 
     override suspend fun chapters(manhwaRemoteId: String, language: String): List<SourceChapter> {
         val series = series(manhwaRemoteId)
-        // The page publishes the whole list in one request; the paged endpoint is the fallback
-        // for a payload whose shape has moved on.
-        val chapters = series.chapters.ifEmpty { pagedChapters(series.id) }
+        // The page streams only the first 100 chapters of a long series, and the payload does not
+        // look truncated: a 146-chapter title arrives with 100 rows and no marker. The count it
+        // publishes beside them is the only way to tell, so a short list is completed from the
+        // paged endpoint instead of being trusted.
+        val chapters = if (series.chapters.size < (series.chapterCount ?: 0)) {
+            combineKaynChapters(series.chapters, pagedChapters(series.id), series.chapterCount)
+        } else {
+            series.chapters.ifEmpty { pagedChapters(series.id) }
+        }
         return dedupeChapters(chapters)
     }
 
@@ -261,13 +267,32 @@ internal fun KaynSeriesDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
     status = status,
 )
 
+/**
+ * Joins the page's list with the paged one when the page clipped it. The page streams the oldest
+ * rows first, so the missing chapters are the newer ones; either source can repeat a row the other
+ * already has, and the remote id is what makes them the same chapter.
+ */
+internal fun combineKaynChapters(
+    payload: List<SourceChapter>,
+    paged: List<SourceChapter>,
+    declared: Int?,
+): List<SourceChapter> {
+    if (paged.isEmpty()) return payload
+    val combined = (payload + paged).distinctBy { it.remoteId }
+    // A list the site itself miscounts is still better than the clipped one.
+    return if (declared == null || combined.size >= declared) combined else payload.ifEmpty { paged }
+}
+
 internal fun KaynChapterDto.toSourceChapter(): SourceChapter? {
-    val number = number ?: return null
     if (id.isBlank()) return null
+    // A chapter with no number keeps the name the API gave it, when it gave one.
+    val label = number?.let { ChapterLabel(formatNumber(it), it) }
+        ?: chapterLabel(title.orEmpty())
+        ?: return null
     return SourceChapter(
         remoteId = id,
-        numberText = formatNumber(number),
-        sortKey = number,
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = title?.takeIf { it.isNotBlank() },
         language = "en",
         pageCount = pageCount,

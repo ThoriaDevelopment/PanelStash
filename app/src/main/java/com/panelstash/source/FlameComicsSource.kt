@@ -392,11 +392,15 @@ internal fun FlameChapterDto.toSourceChapter(seriesId: Int): SourceChapter? {
     val raw = chapter?.trim().orEmpty()
     if (raw.isEmpty()) return null
     val number = raw.toDoubleOrNull()
+    // "143.00" is chapter 143 to a reader, and keeps its real value for ordering. A chapter the
+    // site names instead of numbering keeps its name; anything unrecognised is still listed.
+    val label = number?.let { ChapterLabel(formatNumber(it), it) }
+        ?: chapterLabel(raw)
+        ?: ChapterLabel(raw, null)
     return SourceChapter(
         remoteId = "$seriesId$FLAME_SEPARATOR$token",
-        // "143.00" is chapter 143 to a reader, and keeps its real value for ordering.
-        numberText = number?.let(::formatNumber) ?: raw,
-        sortKey = number,
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = chapterTitle?.takeIf { it.isNotBlank() } ?: title?.takeIf { it.isNotBlank() },
         language = "en",
         // The count arrives with the images on first read.

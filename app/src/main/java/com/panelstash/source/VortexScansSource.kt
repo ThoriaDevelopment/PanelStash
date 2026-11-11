@@ -188,12 +188,15 @@ private fun VortexPostDto.toSourceManhwa(): SourceManhwa = SourceManhwa(
 )
 
 internal fun VortexChapterDto.toSourceChapter(mangaSlug: String): SourceChapter? {
-    val number = number ?: return null
-    val text = formatNumber(number)
+    // A chapter with no number keeps its own name ("Prologue") rather than being dropped.
+    val label = number?.let { ChapterLabel(formatNumber(it), it) }
+        ?: chapterLabel(title.orEmpty())
+        ?: chapterLabel(slug.replace('-', ' '))
+        ?: return null
     return SourceChapter(
         remoteId = "$mangaSlug|$slug",
-        numberText = text,
-        sortKey = number,
+        numberText = label.numberText,
+        sortKey = label.sortKey,
         title = title?.takeIf { it.isNotBlank() },
         language = "en",
         // The API reports page counts only when a chapter is opened, so the count is stored

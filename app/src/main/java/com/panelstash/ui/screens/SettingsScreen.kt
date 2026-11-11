@@ -35,6 +35,7 @@ import com.panelstash.data.TapScroll
 import com.panelstash.data.ThemeMode
 import com.panelstash.source.BrowseSort
 import com.panelstash.source.PageQuality
+import com.panelstash.ui.ALL_SOURCES
 import com.panelstash.ui.AppViewModel
 import com.panelstash.ui.BrandMark
 import com.panelstash.ui.Chip
@@ -299,7 +300,8 @@ fun SettingsScreen(vm: AppViewModel) {
                     ?: enabledSources.firstOrNull()
                 SettingRow(
                     title = "Default source",
-                    subtitle = default?.let { "${it.name} · ${it.description}" } ?: "No sources installed",
+                    subtitle = default?.let { "${it.name} · ${it.description}" }
+                        ?: "All sources · every site at once",
                     onClick = { showSources = true },
                     trailing = {
                         Eyebrow("CHANGE", color = Palette.Accent)
@@ -392,6 +394,41 @@ fun SettingsScreen(vm: AppViewModel) {
             modifier = Modifier.verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            val allSelected = preferences.defaultSourceId == ALL_SOURCES
+            GlassCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .pressable({
+                        vm.updatePreferences { it.copy(defaultSourceId = ALL_SOURCES) }
+                        vm.setBrowseSource(ALL_SOURCES)
+                        showSources = false
+                    }),
+                shape = RoundedCornerShape(18.dp),
+                strong = allSelected,
+                elevation = if (allSelected) 12.dp else 4.dp,
+                contentPadding = PaddingValues(14.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = "All sources",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = Palette.Ink,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "Every installed source, in source-priority order.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Palette.InkSecondary,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Eyebrow(if (allSelected) "DEFAULT" else "USE", color = Palette.Accent)
+                }
+            }
+
             enabledSources.forEach { source ->
                 val selected = source.id == preferences.defaultSourceId
                 GlassCard(

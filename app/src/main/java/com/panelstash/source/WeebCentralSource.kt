@@ -229,13 +229,23 @@ internal fun parseWeebChapters(html: String, seriesId: String): List<SourceChapt
     val chapters = mutableListOf<SourceChapter>()
     for (link in CHAPTER_LINK.findAll(html)) {
         val id = link.groupValues[1]
-        // The number is in the anchor's own text, a few tags after the link opens.
+        // The number is in the anchor's own text, a few tags after the link opens. The same text
+        // is the chapter's name when the site does not number it, and some series are labelled
+        // "Episode 259" rather than "Chapter 259" — reading only "Chapter" dropped every row of
+        // those series, which then arrived as an empty, unreadable chapter list.
         val window = html.substring(link.range.first, minOf(html.length, link.range.first + 700))
-        val number = CHAPTER_NUMBER.find(window)?.groupValues?.get(1) ?: continue
+        val text = window.replace(Regex("""<[^>]+>"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+            .take(120)
+        val number = CHAPTER_NUMBER.find(window)?.groupValues?.get(1)
+        val label = number?.let { ChapterLabel(it, it.toDoubleOrNull()) }
+            ?: chapterLabel(text)
+            ?: continue
         chapters += SourceChapter(
             remoteId = id,
-            numberText = number,
-            sortKey = chapterSortKey(number),
+            numberText = label.numberText,
+            sortKey = label.sortKey,
             title = null,
             language = "en",
             pageCount = 0,
