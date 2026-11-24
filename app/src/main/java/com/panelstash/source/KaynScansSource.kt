@@ -100,7 +100,7 @@ class KaynScansSource(
         val images = decode(KaynPageUrlsResponse.serializer(), body).pages.toPageImages()
         // A coin-locked chapter publishes its pages with the URLs withheld.
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = KAYN_BASE, images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun catalogue(

@@ -46,6 +46,10 @@ class AsuraScansSource(
     /** Politeness: undocumented endpoint, so stay well under a request every 300ms. */
     private val limiter = RateLimiter(300)
 
+    /** A linked profile asks for the same detail twice; one fetch answers both. */
+    @Volatile
+    private var cachedDetail: Triple<String, SourceManhwa, Long>? = null
+
     override suspend fun browse(
         sort: BrowseSort,
         tagId: String?,
@@ -80,10 +84,14 @@ class AsuraScansSource(
             .sortedBy { it.name }
 
     override suspend fun manhwa(remoteId: String): SourceManhwa {
+        val now = System.currentTimeMillis()
+        cachedDetail?.let { (id, detail, at) ->
+            if (id == remoteId && now - at < DETAIL_CACHE_MS) return detail
+        }
         val body = request("/api/series/$remoteId")
         val dto = decode(AsuraSeriesDetailResponse.serializer(), body).series
             ?: throw SourceError.Unavailable()
-        return dto.toSourceManhwa()
+        return dto.toSourceManhwa().also { cachedDetail = Triple(remoteId, it, now) }
     }
 
     override suspend fun chapters(manhwaRemoteId: String, language: String): List<SourceChapter> {
@@ -107,7 +115,7 @@ class AsuraScansSource(
                 PageImage(index = index, url = page.url, width = page.width, height = page.height)
             }
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = CDN, images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun request(
@@ -152,6 +160,9 @@ class AsuraScansSource(
         const val BASE = "https://api.asurascans.com"
         const val CDN = "https://cdn.asurascans.com"
         const val SEPARATOR = "|"
+
+        /** Long enough to serve a profile's repeated detail reads, short enough to see edits. */
+        const val DETAIL_CACHE_MS = 60_000L
 
         fun pageOf(offset: Int, limit: Int): Int = offset / limit.coerceAtLeast(1) + 1
     }

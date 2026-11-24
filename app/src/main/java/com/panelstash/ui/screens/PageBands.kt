@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
 import android.graphics.Rect
+import android.util.LruCache
 import coil3.ImageLoader
 import coil3.asImage
 import coil3.decode.DecodeResult
@@ -31,6 +32,15 @@ private const val MAX_DECODE_HEIGHT = 16_384
 private val bandSlots = Semaphore(permits = 4)
 
 /**
+ * Encoded bytes of the pages being decoded in bands. Every band of one page is a separate
+ * request, and each used to read the whole encoded file from the disk cache again. A small LRU
+ * keeps the bytes of the pages on screen (and the few around them) so only decodes remain.
+ */
+private val bandBytes = object : LruCache<String, ByteArray>(8 * 1024 * 1024) {
+    override fun sizeOf(key: String, value: ByteArray): Int = value.size
+}
+
+/**
  * Decodes one horizontal band of a very tall page.
  *
  * A webtoon page is often a single strip 40,000 px tall. Decoded whole it is far past the bitmap
@@ -43,13 +53,15 @@ private val bandSlots = Semaphore(permits = 4)
  */
 internal class PageBandDecoder(
     private val source: ImageSource,
+    private val key: String,
     private val band: Int,
     private val bands: Int,
 ) : Decoder {
 
     @Suppress("DEPRECATION") // The byte array overload is the only one below Android 12.
     override suspend fun decode(): DecodeResult = bandSlots.withPermit {
-        val bytes = source.source().use { it.readByteArray() }
+        val bytes = bandBytes.get(key)
+            ?: source.source().use { it.readByteArray() }.also { bandBytes.put(key, it) }
         // WebP only became region-decodable in Android 12; an older phone gets a sampled whole
         // image with its band cut out instead, which is soft but not blank.
         val region = runCatching {
@@ -92,12 +104,16 @@ internal class PageBandDecoder(
         return DecodeResult(bandBitmap.asImage(), true)
     }
 
-    class Factory(private val band: Int, private val bands: Int) : Decoder.Factory {
+    class Factory(
+        private val key: String,
+        private val band: Int,
+        private val bands: Int,
+    ) : Decoder.Factory {
         override fun create(
             result: SourceFetchResult,
             options: Options,
             imageLoader: ImageLoader,
-        ): Decoder = PageBandDecoder(result.source, band, bands)
+        ): Decoder = PageBandDecoder(result.source, key, band, bands)
     }
 }
 
@@ -115,7 +131,7 @@ internal fun bandRequest(
     bands: Int,
 ): ImageRequest = ImageRequest.Builder(context)
     .data(model)
-    .decoderFactory(PageBandDecoder.Factory(band, bands))
+    .decoderFactory(PageBandDecoder.Factory(model.toString(), band, bands))
     .memoryCacheKey("$model#band/$band/$bands")
     .crossfade(false)
     .build()

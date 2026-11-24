@@ -6,6 +6,7 @@ import androidx.work.WorkerParameters
 import com.panelstash.PanelStashApp
 import com.panelstash.source.PageQuality
 import com.panelstash.source.SourceError
+import com.panelstash.source.httpsImageUrl
 import com.panelstash.source.shortLabel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -47,14 +48,17 @@ class ChapterDownloadWorker(
                 meteredAllowed = inputData.getBoolean(KEY_METERED, false),
             )
             val pages = source.pages(chapter.remoteId, quality).images
+            if (pages.isEmpty()) throw SourceError.Unavailable()
             var written = 0L
 
             for (page in pages) {
-                val target = container.downloads.pageFile(dir, page.index, page.url)
-                container.imageClient.newCall(Request.Builder().url(page.url).build()).execute().use { response ->
+                if (isStopped) throw CancellationException("Cancelled")
+                // Android will not fetch cleartext, and the image hosts answer HTTPS too.
+                val url = httpsImageUrl(page.url)
+                val target = container.downloads.pageFile(dir, page.index, url)
+                container.imageClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
                     if (!response.isSuccessful) throw SourceError.Transient()
-                    val body = response.body ?: throw SourceError.Transient()
-                    target.outputStream().use { output -> body.byteStream().copyTo(output) }
+                    target.outputStream().use { output -> response.body.byteStream().copyTo(output) }
                     written += target.length()
                 }
                 DownloadNotifications.notifyProgress(
@@ -65,6 +69,7 @@ class ChapterDownloadWorker(
                 )
             }
 
+            if (isStopped) throw CancellationException("Cancelled")
             container.downloads.complete(manhwa.id, chapterId, dir, written, quality)
             DownloadNotifications.notifyDone(applicationContext, manhwa.title, chapter.numberText)
             Result.success()

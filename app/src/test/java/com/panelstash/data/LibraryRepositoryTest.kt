@@ -23,6 +23,8 @@ import com.panelstash.source.SourceRegistry
 import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -42,8 +44,8 @@ class LibraryRepositoryTest {
     private lateinit var db: PanelStashDatabase
     private lateinit var manhwaDao: ManhwaDao
     private lateinit var chapterDao: ChapterDao
-    private var nextId = 1L
-    private val stored = mutableMapOf<Long, ManhwaEntity>()
+    private val nextId = AtomicLong(1)
+    private val stored = ConcurrentHashMap<Long, ManhwaEntity>()
 
     @Before
     fun setUp() {
@@ -60,9 +62,20 @@ class LibraryRepositoryTest {
         coEvery { manhwaDao.byRemote(any(), any()) } returns null
         coEvery { manhwaDao.insert(any()) } coAnswers {
             val entity = firstArg<ManhwaEntity>()
-            val id = nextId++
+            val id = nextId.getAndIncrement()
             stored[id] = entity.copy(id = id)
             id
+        }
+        coEvery { manhwaDao.byRemotes(any(), any()) } returns emptyList()
+        coEvery { manhwaDao.insertAll(any()) } coAnswers {
+            firstArg<List<ManhwaEntity>>().map { entity ->
+                val id = nextId.getAndIncrement()
+                stored[id] = entity.copy(id = id)
+                id
+            }
+        }
+        coEvery { manhwaDao.updateAll(any()) } coAnswers {
+            firstArg<List<ManhwaEntity>>().forEach { stored[it.id] = it }
         }
         coEvery { manhwaDao.byId(any()) } coAnswers { stored[firstArg<Long>()] }
     }
@@ -142,6 +155,18 @@ class LibraryRepositoryTest {
         assertEquals(listOf("hit-one"), results.items.map { it.title })
         assertEquals(listOf("mount hua"), first.searchQueries)
         assertEquals(listOf("mount hua"), second.searchQueries)
+    }
+
+    @Test
+    fun `searchAll does not mark a failed source exhausted`() = runBlocking {
+        val failed = FakeSource(id = "failed", searchFailure = SourceError.Transient())
+        val working = FakeSource(id = "working", searchHits = listOf(manhwa("hit")))
+
+        val page = repository(failed, working).searchAll("query", emptyMap(), limit = 30)
+
+        // The working source returned a short page, but the failed source may still have more.
+        assertFalse(page.exhausted)
+        assertEquals(listOf("hit"), page.items.map { it.title })
     }
 
     @Test

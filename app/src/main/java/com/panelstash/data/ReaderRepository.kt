@@ -4,7 +4,9 @@ import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.ManhwaEntity
 import android.graphics.BitmapFactory
 import com.panelstash.download.DownloadStore
+import com.panelstash.source.SourceError
 import com.panelstash.source.SourceRegistry
+import com.panelstash.source.httpsImageUrl
 import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -56,6 +58,7 @@ class ReaderRepository(
     private data class Entry(val pages: List<ReaderPage>, val at: Long)
 
     private val cache = LinkedHashMap<Long, Entry>()
+    private val cacheLock = Any()
 
     /**
      * One resolution per chapter at a time. The reader opening a chapter and the prefetch of the
@@ -88,29 +91,38 @@ class ReaderRepository(
         }
         return lock.withLock {
             cached(chapter.id) ?: resolveRemote(chapter, manhwa).also { pages ->
-                cache[chapter.id] = Entry(pages, clock())
-                if (cache.size > CACHE_LIMIT) cache.remove(cache.keys.first())
+                synchronized(cacheLock) {
+                    cache[chapter.id] = Entry(pages, clock())
+                    if (cache.size > CACHE_LIMIT) cache.remove(cache.keys.first())
+                }
             }
         }
     }
 
-    private fun cached(chapterId: Long): List<ReaderPage>? {
-        val entry = cache[chapterId] ?: return null
-        if (clock() - entry.at < CACHE_TTL_MS) return entry.pages
+    private fun cached(chapterId: Long): List<ReaderPage>? = synchronized(cacheLock) {
+        val entry = cache[chapterId] ?: return@synchronized null
+        if (clock() - entry.at < CACHE_TTL_MS) return@synchronized entry.pages
         cache.remove(chapterId)
-        return null
+        null
     }
 
     /** Drops the cached page list for a chapter, e.g. after its download was deleted. */
     fun invalidate(chapterId: Long) {
-        cache.remove(chapterId)
+        synchronized(cacheLock) { cache.remove(chapterId) }
     }
 
 
     private suspend fun resolveRemote(chapter: ChapterEntity, manhwa: ManhwaEntity): List<ReaderPage> {
         val source = sources.get(manhwa.sourceId)
-        val set = source.pages(chapter.remoteId, settings.streamingQuality)
-        return set.images.map { ReaderPage.Remote(it.url, it.width, it.height) }
+        // Page lists are scraped after the request returns, so keep that parsing off the frame
+        // that is waiting to show the first panel.
+        val set = withContext(Dispatchers.IO) {
+            source.pages(chapter.remoteId, settings.streamingQuality)
+        }
+        // A source that answered successfully with no images is not a readable chapter. Without
+        // this, the reader composed an empty list, marked the chapter finished, and moved on.
+        if (set.images.isEmpty()) throw SourceError.Unavailable()
+        return set.images.map { ReaderPage.Remote(httpsImageUrl(it.url), it.width, it.height) }
     }
 
     private companion object {

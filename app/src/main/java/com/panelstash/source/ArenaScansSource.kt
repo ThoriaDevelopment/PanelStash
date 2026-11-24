@@ -5,10 +5,13 @@ import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.parameter
+import io.ktor.client.statement.bodyAsBytes
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.IOException
+import java.util.Collections
 
 /**
  * Arena Scans, a WordPress site on a Madara-derived theme, served entirely as HTML.
@@ -58,6 +61,13 @@ class ArenaScansSource(
 
     @Volatile
     private var cachedTermIds: Map<String, Int>? = null
+
+    /** Detail and chapter list are the same page, so opening a title reads it once. */
+    @Volatile
+    private var cachedDetail: Triple<String, String, Long>? = null
+
+    /** Promo artwork already recognised, so a repeated banner is not probed again. */
+    private val knownPromoUrls: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
 
     override suspend fun browse(
         sort: BrowseSort,
@@ -140,21 +150,59 @@ class ArenaScansSource(
     }
 
     override suspend fun manhwa(remoteId: String): SourceManhwa {
-        val body = request("/manga/$remoteId/") { html() }
+        val body = detailPage(remoteId)
         return parseArenaSeries(body, remoteId)
     }
 
     override suspend fun chapters(manhwaRemoteId: String, language: String): List<SourceChapter> {
-        val body = request("/manga/$manhwaRemoteId/") { html() }
+        val body = detailPage(manhwaRemoteId)
         return dedupeChapters(parseArenaChapters(body))
+    }
+
+    /**
+     * One detail page serves both the title and its chapter list. Linking a profile reads the
+     * same page twice otherwise, and an Arena page is a few hundred KB of markup.
+     */
+    private suspend fun detailPage(remoteId: String): String {
+        val now = System.currentTimeMillis()
+        cachedDetail?.let { (id, body, at) ->
+            if (id == remoteId && now - at < DETAIL_CACHE_MS) return body
+        }
+        val body = request("/manga/$remoteId/") { html() }
+        cachedDetail = Triple(remoteId, body, now)
+        return body
     }
 
     override suspend fun pages(chapterRemoteId: String, quality: PageQuality): PageSet {
         val body = request("/$chapterRemoteId/") { html() }
-        val images = parseArenaPages(body)
+        var images = parseArenaPages(body)
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = ARENA_CDN, images = images)
+        // Some Arena chapters end with a short recommendation banner served from the chapter's
+        // own folder, so the markup cannot tell it from a page. A page of a webtoon is taller
+        // than it is wide and the banner is not, so only the last image's header is read.
+        if (images.size > 1) {
+            val last = images.last()
+            if (last.url in knownPromoUrls || isWidePromo(last.url)) {
+                knownPromoUrls += last.url
+                images = images.dropLast(1)
+            }
+        }
+        return PageSet(images = images)
     }
+
+    /**
+     * Reads only the last image's header. A slow or unhelpful CDN must not hold the chapter: an
+     * unanswered probe leaves the image in place, which is no worse than before.
+     */
+    private suspend fun isWidePromo(url: String): Boolean = runCatching {
+        withTimeoutOrNull(PROMO_PROBE_MS) {
+            val bytes = client.get(url) {
+                header("Range", "bytes=0-63")
+                header("Referer", "$ARENA_BASE/")
+            }.bodyAsBytes()
+            imageIsWide(bytes)
+        }
+    }.getOrNull() ?: false
 
     private suspend fun request(
         path: String,
@@ -198,6 +246,12 @@ class ArenaScansSource(
 
         /** Rows the filtered archive lists. */
         const val FILTERED_PAGE = 20
+
+        /** Long enough to serve detail and chapters together, short enough to see new chapters. */
+        const val DETAIL_CACHE_MS = 60_000L
+
+        /** A header probe answers in well under this; a slow CDN must not delay the chapter. */
+        const val PROMO_PROBE_MS = 700L
     }
 }
 
@@ -336,12 +390,76 @@ internal fun parseArenaChapters(html: String): List<SourceChapter> {
 /** Pages live on one CDN folder; the logo and other chrome are served from the site itself. */
 private val ARENA_PAGE = Regex("""<img[^>]+src="(https://cdn\.arenascan\.com/[^"]+)"""")
 
-internal fun parseArenaPages(html: String): List<PageImage> =
-    ARENA_PAGE.findAll(html)
+/**
+ * Artwork the reader page appends after the chapter: related-series cards, the site's own
+ * banners and support pages. Their filenames say what they are, and they are not story pages.
+ */
+private val ARENA_PAGE_PROMO = Regex(
+    """(?i)(recommend|related|banner|promo|sponsor|advert|discord|patreon|merch|credit)""",
+)
+
+/** `arena-bucket/<series id>`: every page of a chapter is filed under its series. */
+private fun arenaSeriesFolder(url: String): String? {
+    val parts = url.substringAfter("cdn.arenascan.com/", "")
+        .split('/')
+        .filter { it.isNotBlank() }
+    return if (parts.size >= 3 && parts[0] == "arena-bucket") "${parts[0]}/${parts[1]}" else null
+}
+
+internal fun parseArenaPages(html: String): List<PageImage> {
+    val urls = ARENA_PAGE.findAll(html)
         .map { it.groupValues[1] }
         .distinct()
-        .mapIndexed { index, url -> PageImage(index = index, url = url) }
+        .filterNot { ARENA_PAGE_PROMO.containsMatchIn(it) }
         .toList()
+    if (urls.isEmpty()) return emptyList()
+    // The reader page also carries the site's related-series cards. They share the CDN host,
+    // so the upload folder is what separates a page from a poster: the chapter's pages are all
+    // under one series folder, and artwork from another series is appended chrome, not story.
+    val folder = urls.mapNotNull(::arenaSeriesFolder)
+        .groupingBy { it }
+        .eachCount()
+        .maxByOrNull { it.value }
+        ?.key
+    val pages = if (folder == null) urls else urls.filter { arenaSeriesFolder(it) == folder }
+    return pages.ifEmpty { urls }.mapIndexed { index, url -> PageImage(index = index, url = url) }
+}
+
+/**
+ * True when an image is much wider than it is tall, which a webtoon page never is. Only the
+ * WebP forms Arena's CDN serves are read; anything else is left alone rather than guessed at.
+ */
+internal fun imageIsWide(bytes: ByteArray): Boolean {
+    val size = webpSize(bytes) ?: return false
+    val (width, height) = size
+    return height > 0 && width > height * 3 / 2
+}
+
+private fun webpSize(bytes: ByteArray): Pair<Int, Int>? {
+    if (bytes.size < 30) return null
+    fun text(from: Int, to: Int): String = bytes.copyOfRange(from, to).decodeToString()
+    if (text(0, 4) != "RIFF" || text(8, 12) != "WEBP") return null
+    return when (text(12, 16)) {
+        // Extended format: 24-bit canvas dimensions, stored minus one.
+        "VP8X" -> {
+            val width = 1 + (bytes[24].u8() or (bytes[25].u8() shl 8) or (bytes[26].u8() shl 16))
+            val height = 1 + (bytes[27].u8() or (bytes[28].u8() shl 8) or (bytes[29].u8() shl 16))
+            width to height
+        }
+        // Lossy format: three-byte start code, then two 14-bit dimensions.
+        "VP8 " -> {
+            if (bytes[23].u8() != 0x9d || bytes[24].u8() != 0x01 || bytes[25].u8() != 0x2a) {
+                return null
+            }
+            val width = bytes[26].u8() or ((bytes[27].u8() and 0x3f) shl 8)
+            val height = bytes[28].u8() or ((bytes[29].u8() and 0x3f) shl 8)
+            width to height
+        }
+        else -> null
+    }
+}
+
+private fun Byte.u8(): Int = toInt() and 0xFF
 
 /**
  * Genre names as the archive's filter form spells them, each with the id its genre page answers

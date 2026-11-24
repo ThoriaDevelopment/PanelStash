@@ -109,7 +109,7 @@ class OrionScansSource(
         }
         val images = chapter.toPageImages()
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = images.first().url.substringBefore("/upload/"), images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun series(seriesSlug: String): OrionPostDetailDto {

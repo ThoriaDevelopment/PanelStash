@@ -31,6 +31,7 @@ import com.panelstash.source.SourceGenre
 import com.panelstash.update.UpdateState
 import com.panelstash.ui.warmRequest
 import java.util.Collections
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -46,20 +47,18 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 private const val BROWSE_PAGE = 30
 private const val SEARCH_PAGE = 30
 
 /**
- * Pages whose encoded bytes are warmed ahead of the reader. The two pages just ahead are left to
- * the reader itself: warming them would put four more transfers in front of the page the reader is
- * about to look at, which on a slow link makes the visible page arrive later, not sooner.
+ * Pages whose encoded bytes are warmed ahead of the reader. The page immediately after the one on
+ * screen is warmed first: it is the page a scroll or a tap reaches next, and leaving it to the
+ * reader is what made it arrive after the pages behind it.
  */
-private const val PREFETCH_AHEAD = 6
-
-/** The first page ahead that is warmed rather than left to the reader. */
-private const val PREFETCH_NEAR_GAP = 2
+private const val PREFETCH_AHEAD = 8
 
 /** Pages kept warm behind the reader, so scrolling back up is a cache hit too. */
 private const val PREFETCH_BEHIND = 2
@@ -80,6 +79,9 @@ private const val PROGRESS_WRITE_DELAY_MS = 600L
 
 /** A stored chapter list older than this is refreshed when its profile is opened. */
 private const val CHAPTER_REFRESH_MS = 6 * 60 * 60 * 1000L
+
+/** The rails wait for the first grid page: they cost several requests per source. */
+private const val DISCOVERY_DEFER_MS = 3_000L
 
 /** The other sources carrying an opened title are looked for again after this long. */
 private const val LINK_REFRESH_MS = 10 * 60 * 1000L
@@ -292,6 +294,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (current.lastOrNull() is Screen.Reader && screen !is Screen.Reader) _reader.value = null
     }
 
+    /** True only while this exact chapter is still the screen on top. */
+    private fun isReaderOpen(chapterId: Long): Boolean =
+        (stack.value.lastOrNull() as? Screen.Reader)?.chapterId == chapterId
+
     fun back(): Boolean {
         val current = stack.value
         if (current.size <= 1) return false
@@ -372,7 +378,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Called when the Browse tab becomes visible. Only does work when it has nothing to show. */
     fun primeBrowse() {
         loadGenres()
-        if (_browse.value.manhwa.isEmpty() && !_browse.value.loading) refreshBrowse()
+        // A finished request can leave the loading flag set if its result was ignored while the
+        // source changed. The job itself is the truth, so recover instead of showing a spinner
+        // over an empty grid for ever.
+        if (_browse.value.manhwa.isEmpty() && browseJob?.isActive != true) refreshBrowse()
         refreshDiscovery()
     }
 
@@ -385,6 +394,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (force) container.discovery.invalidate()
         _discovery.value = _discovery.value.copy(loading = true)
         discoveryJob = viewModelScope.launch {
+            // The grid is what the reader is waiting for. The rails cost several requests per
+            // source, so they wait until the first catalogue page has landed instead of
+            // queueing behind it in each source's rate limiter.
+            var waited = 0L
+            while (_browse.value.loading && waited < DISCOVERY_DEFER_MS) {
+                delay(50)
+                waited += 50
+            }
             runCatching { container.discovery.rails(force = force) }
                 .onSuccess { rails -> _discovery.value = DiscoveryState(loading = false, rails = rails) }
                 .onFailure { _discovery.value = _discovery.value.copy(loading = false) }
@@ -401,8 +418,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         similarJob?.cancel()
         _similar.value = SimilarState(manhwaId = manhwaId, loading = true)
         similarJob = viewModelScope.launch {
-            runCatching { container.discovery.similar(manhwaId, force = force) }
-                .onSuccess { cards ->
+            try {
+                val cards = container.discovery.similar(manhwaId, force = force)
+                if (_similar.value.manhwaId == manhwaId) {
                     _similar.value = SimilarState(
                         manhwaId = manhwaId,
                         loading = false,
@@ -410,9 +428,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         cards = cards,
                     )
                 }
-                .onFailure {
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                if (_similar.value.manhwaId == manhwaId) {
                     _similar.value = SimilarState(manhwaId = manhwaId, loading = false, attempted = true)
                 }
+            }
         }
     }
 
@@ -426,7 +448,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // sources known never to publish them.
             val reports = source.capabilities.titleGenres || source.capabilities.genres
             val genres = if (reports) {
-                runCatching { source.manhwa(manhwa.remoteId) }.getOrNull()?.genres.orEmpty()
+                runCatching {
+                    withContext(Dispatchers.IO) { source.manhwa(manhwa.remoteId) }
+                }.getOrNull()?.genres.orEmpty()
             } else {
                 emptyList()
             }
@@ -475,9 +499,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             tagName = null,
             genres = emptyList(),
             manhwa = emptyList(),
+            loading = false,
+            loadingMore = false,
             endReached = false,
             error = null,
         )
+        // Start the new source immediately. Waiting for the old request would leave the empty
+        // grid with `loading` set when the old result is correctly ignored for the new source.
+        refreshBrowse()
         primeBrowse()
     }
 
@@ -512,7 +541,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val requestedFilter = _browse.value.filter
         browseJob?.cancel()
         allBrowseOffsets = emptyMap()
-        _browse.value = _browse.value.copy(loading = true, error = null)
+        _browse.value = _browse.value.copy(loading = true, loadingMore = false, error = null)
         browseJob = viewModelScope.launch {
             if (requestedSource == ALL_SOURCES) {
                 runCatching {
@@ -522,6 +551,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         filter = BrowseFilter(status = requestedFilter.status),
                         offsets = emptyMap(),
                         limit = BROWSE_PAGE,
+                        // Each site is drawn as soon as it answers; the grid must not wait for
+                        // the slowest one before showing anything at all.
+                        onPartial = { partial ->
+                            if (partial.isNotEmpty() &&
+                                isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)
+                            ) {
+                                // The grid is drawn now, but `loading` stays true until the last
+                                // source answers so "load more" cannot race the first page and
+                                // be replaced by its final list.
+                                _browse.value = _browse.value.copy(
+                                    manhwa = partial,
+                                    error = null,
+                                )
+                            }
+                        },
                     )
                 }
                     .onSuccess { page ->
@@ -536,6 +580,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     .onFailure { error ->
+                        if (error is CancellationException) return@onFailure
                         if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
                             _browse.value = _browse.value.copy(loading = false, error = friendly(error))
                         }
@@ -562,6 +607,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     .onFailure { error ->
+                        if (error is CancellationException) return@onFailure
                         if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
                             _browse.value = _browse.value.copy(loading = false, error = friendly(error))
                         }
@@ -595,7 +641,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             allBrowseOffsets = page.nextOffsets
                             val current = _browse.value
                             _browse.value = current.copy(
-                                manhwa = current.manhwa + page.items,
+                                manhwa = appendUnique(current.manhwa, page.items),
                                 loadingMore = false,
                                 endReached = page.exhausted,
                             )
@@ -617,7 +663,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         val current = _browse.value
                         _browse.value = if (current.manhwa.size == offset) {
                             current.copy(
-                                manhwa = current.manhwa + items,
+                                manhwa = appendUnique(current.manhwa, items),
                                 loadingMore = false,
                                 endReached = items.size < BROWSE_PAGE,
                             )
@@ -627,6 +673,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) return@onFailure
                     if (isCurrent(requestedSource, requestedSort, requestedTag, requestedFilter)) {
                         _browse.value = _browse.value.copy(loadingMore = false, error = friendly(error))
                     }
@@ -642,6 +689,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     ): Boolean {
         val state = _browse.value
         return state.sourceId == sourceId && state.sort == sort && state.tagId == tagId && state.filter == filter
+    }
+
+    /** A page can repeat a row when a live catalogue shifts under an offset. Never key twice. */
+    private fun appendUnique(existing: List<ManhwaEntity>, incoming: List<ManhwaEntity>): List<ManhwaEntity> {
+        if (incoming.isEmpty()) return existing
+        val ids = existing.mapTo(HashSet()) { it.id }
+        return existing + incoming.filter { ids.add(it.id) }
     }
 
     // --- library ----------------------------------------------------------
@@ -783,6 +837,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 chain.tried += source.id
                 val localId = runCatching { library.openManhwa(source.id, target.remoteId) }.getOrNull()
                     ?: return@launch
+                // If the reader moved on while the other source was being opened, this result is
+                // stale and must not replace an unrelated screen.
+                if ((stack.value.lastOrNull() as? Screen.Profile)?.manhwaId != manhwaId) return@launch
                 _message.value = "Opened on ${source.name}"
                 replaceTop(Screen.Profile(localId))
                 ensureChapters(localId)
@@ -865,7 +922,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 // The names this source publishes for the title, alternates included: two sites
                 // that call the same series different things are still one series.
                 val anchor = runCatching {
-                    library.source(manhwa.sourceId)?.manhwa(manhwa.remoteId)
+                    withContext(Dispatchers.IO) {
+                        library.source(manhwa.sourceId)?.manhwa(manhwa.remoteId)
+                    }
                 }.getOrNull()
                 val names = listOf(manhwa.title) + anchor?.aliases.orEmpty()
                 val matches = runCatching {
@@ -880,7 +939,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     matches.forEach { (source, target) ->
                         launch {
                             val id = withTimeoutOrNull(LINK_OPEN_TIMEOUT_MS) {
-                                runCatching { library.openManhwa(source.id, target.remoteId) }
+                                // The search row already has the title and cover; only the
+                                // chapters are needed from this copy, so its detail page is
+                                // not fetched a second time.
+                                runCatching { library.openLinked(source, target) }
                                     .getOrNull()
                             } ?: return@launch
                             if (id == manhwaId || id in ids) return@launch
@@ -925,10 +987,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _search.value = _search.value.copy(query = query)
         searchDebounceJob?.cancel()
         if (query.isBlank()) {
-            if (_search.value.results.isEmpty() && !_search.value.loading) runSearch("")
+            // Emptying the field must leave the previous query's results behind, not keep them
+            // under a "Popular now" heading.
+            runSearch("")
             return
         }
-        if (query.trim().length < MIN_QUERY) return
+        if (query.trim().length < MIN_QUERY) {
+            _search.value = _search.value.copy(
+                results = emptyList(),
+                loading = false,
+                loadingMore = false,
+                endReached = false,
+                message = null,
+            )
+            return
+        }
         searchDebounceJob = viewModelScope.launch {
             delay(SEARCH_DEBOUNCE_MS)
             runSearch(query.trim())
@@ -955,6 +1028,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         searchOffsets = emptyMap()
         _search.value = _search.value.copy(
             query = query,
+            // A new query is a new list. Keeping the old rows while the debounce and network
+            // work made a slow search look like it had answered a different query.
+            results = emptyList(),
             loading = true,
             loadingMore = false,
             endReached = false,
@@ -963,13 +1039,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         searchJob = viewModelScope.launch {
             runCatching {
                 if (requestedSource == ALL_SOURCES) {
-                    library.searchAll(requestedQuery, emptyMap(), SEARCH_PAGE)
+                    library.searchAll(
+                        query = requestedQuery,
+                        offsets = emptyMap(),
+                        limit = SEARCH_PAGE,
+                        // Draw each site's results as they arrive, as Browse now does.
+                        onPartial = { partial ->
+                            if (partial.isNotEmpty() && isCurrentSearch(requestedSource, requestedQuery)) {
+                                _search.value = _search.value.copy(results = partial, message = null)
+                            }
+                        },
+                    )
                 } else {
                     library.search(requestedSource, requestedQuery, offset = 0, limit = SEARCH_PAGE)
                 }
             }
                 .onSuccess { page ->
-                    if (_search.value.sourceId == requestedSource) {
+                    if (isCurrentSearch(requestedSource, requestedQuery)) {
                         searchOffsets = page.nextOffsets
                         _search.value = _search.value.copy(
                             results = page.items,
@@ -980,12 +1066,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
-                    if (_search.value.sourceId == requestedSource) {
+                    if (error is CancellationException) return@onFailure
+                    if (isCurrentSearch(requestedSource, requestedQuery)) {
                         _search.value = _search.value.copy(loading = false, message = friendly(error))
                     }
                 }
         }
     }
+
+    /** A search may finish after the reader has changed the query or source. Ignore it then. */
+    private fun isCurrentSearch(sourceId: String, query: String): Boolean =
+        _search.value.sourceId == sourceId && _search.value.query.trim() == query
 
     /** The next page of a search, which continues every source rather than replaying the first. */
     fun loadMoreSearch() {
@@ -1004,17 +1095,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
                 .onSuccess { page ->
+                    if (!isCurrentSearch(requestedSource, query)) return@onSuccess
                     val current = _search.value
-                    if (current.sourceId != requestedSource) return@onSuccess
                     searchOffsets = page.nextOffsets
                     _search.value = current.copy(
-                        results = current.results + page.items,
+                        results = appendUnique(current.results, page.items),
                         loadingMore = false,
                         endReached = page.exhausted,
                     )
                 }
                 .onFailure { error ->
-                    _search.value = _search.value.copy(loadingMore = false, message = friendly(error))
+                    if (error is CancellationException) return@onFailure
+                    if (isCurrentSearch(requestedSource, query)) {
+                        _search.value = _search.value.copy(loadingMore = false, message = friendly(error))
+                    }
                 }
         }
     }
@@ -1052,6 +1146,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Replaces the open chapter with another one from the same title. */
     fun switchChapter(chapterId: Long, ownerManhwaId: Long) {
         if (_reader.value?.chapter?.id == chapterId) return
+        if (stack.value.lastOrNull() !is Screen.Reader) return
         stack.value = stack.value.dropLast(1)
         openChapter(chapterId, 0, ownerManhwaId)
     }
@@ -1070,8 +1165,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             val chapter = library.chapter(chapterId)
             val manhwa = chapter?.let { container.db.manhwaDao().byId(it.manhwaId) }
             if (chapter == null || manhwa == null) {
-                _message.value = "Unavailable"
-                back()
+                if (isReaderOpen(chapterId)) {
+                    _message.value = "Unavailable"
+                    back()
+                }
                 return@launch
             }
             val owner = ownerManhwaId ?: manhwa.id
@@ -1099,14 +1196,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         chapter = fresh,
                         pages = pages,
                         startPage = resolved,
-                        nextChapterId = library
-                            .nextChapterIn(groupOf(owner), fresh.id, rankForTitle(owner))?.id,
+                        // The chapter's own copy is part of the group even when it was merged
+                        // in from a sibling source, so the next lookup can see its neighbours.
+                        nextChapterId = library.nextChapterIn(
+                            manhwaIds = (groupOf(owner) + fresh.manhwaId).distinct(),
+                            chapterId = fresh.id,
+                            rank = rankForTitle(owner),
+                        )?.id,
                     )
                     prefetch(pages, resolved)
                 }
                 .onFailure { error ->
-                    _message.value = friendly(error)
-                    back()
+                    // The reader may have been closed while the pages were resolving. Popping
+                    // whatever is on top now would close an unrelated profile or search.
+                    if (isReaderOpen(chapterId)) {
+                        _message.value = friendly(error)
+                        back()
+                    }
                 }
         }
     }
@@ -1136,9 +1242,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val first = runCatching { container.reader.pages(chapter, manhwa) }
         first.getOrNull()?.takeIf { it.isNotEmpty() }?.let { return OpenPages(chapter, manhwa, it) }
         val error = first.exceptionOrNull()
-        // A dropped connection or a source that did not answer is worth one more try before the
-        // chapter is treated as missing.
-        if (error is SourceError.Transient || error is SourceError.Offline) {
+        // A dropped connection, a source that did not answer, or a page that parsed as empty
+        // because the site briefly served a challenge is worth one more try before the chapter
+        // is treated as missing. A rate limit or a ban is not: that only gets worse.
+        if (error is SourceError.Transient || error is SourceError.Offline || error is SourceError.Unavailable) {
             delay(200)
             runCatching { container.reader.pages(chapter, manhwa) }
                 .getOrNull()
@@ -1193,13 +1300,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val context = getApplication<Application>()
         val firstByte = (from - PREFETCH_BEHIND).coerceAtLeast(0)
         val lastByte = (from + PREFETCH_AHEAD).coerceAtMost(pages.lastIndex)
-        // Pages behind are usually already in the sets, so a warm loop over them costs nothing.
-        val firstPicture = from + PREFETCH_NEAR_GAP
+        // The page just ahead comes first: it is the one a scroll or a tap reaches next. Pages
+        // behind are usually already in the sets, so a repeat visit costs nothing.
+        val firstPicture = from + 1
         val lastPicture = (from + PREFETCH_DECODED_AHEAD).coerceAtMost(pages.lastIndex)
-        // Behind the reader, then beyond the gap: never the page under the reader's eyes.
         val byteWindow = sequence {
+            if (from + 1 <= lastByte) yield(from + 1)
+            for (index in (from + 2)..lastByte) yield(index)
             for (index in firstByte until from) yield(index)
-            for (index in (from + PREFETCH_NEAR_GAP)..lastByte) yield(index)
         }
         viewModelScope.launch {
             for (index in byteWindow) {
@@ -1207,27 +1315,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val page = pages[index] as? ReaderPage.Remote ?: continue
                 container.imageLoader.enqueue(warmRequest(context, page.url))
             }
-            for (index in firstPicture..lastPicture) {
-                if (!prefetchedPictures.add(index)) continue
-                val page = pages[index] as? ReaderPage.Remote ?: continue
-                val pageWidth = if (page.width > 0) minOf(width, page.width) else width
-                val height = if (page.width > 0 && page.height > 0) {
-                    (pageWidth.toLong() * page.height / page.width).toInt()
-                } else {
-                    (pageWidth / (page.aspectOrNull() ?: FALLBACK_PAGE_ASPECT)).toInt()
+            if (firstPicture <= lastPicture) {
+                for (index in firstPicture..lastPicture) {
+                    if (!prefetchedPictures.add(index)) continue
+                    val page = pages[index] as? ReaderPage.Remote ?: continue
+                    val pageWidth = if (page.width > 0) minOf(width, page.width) else width
+                    val height = if (page.width > 0 && page.height > 0) {
+                        (pageWidth.toLong() * page.height / page.width).toInt()
+                    } else {
+                        (pageWidth / (page.aspectOrNull() ?: FALLBACK_PAGE_ASPECT)).toInt()
+                    }
+                    // A strip this tall is drawn as bands; decoding it whole would be a bitmap
+                    // the reader never asks for. Its bytes are already warming above.
+                    if (height > MAX_DECODE_AHEAD_HEIGHT) continue
+                    container.imageLoader.enqueue(
+                        ImageRequest.Builder(context)
+                            .data(page.url)
+                            .size(pageWidth, height)
+                            .precision(Precision.INEXACT)
+                            .allowHardware(true)
+                            .crossfade(false)
+                            .build(),
+                    )
                 }
-                // A strip this tall is drawn as bands; decoding it whole would be a bitmap the
-                // reader never asks for. Its bytes are already warming above.
-                if (height > MAX_DECODE_AHEAD_HEIGHT) continue
-                container.imageLoader.enqueue(
-                    ImageRequest.Builder(context)
-                        .data(page.url)
-                        .size(pageWidth, height)
-                        .precision(Precision.INEXACT)
-                        .allowHardware(true)
-                        .crossfade(false)
-                        .build(),
-                )
             }
         }
     }
@@ -1246,8 +1356,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         preparedNextFor = chapterId
         prepareNextJob = viewModelScope.launch {
             val owner = state.ownerManhwaId
-            val next = library.nextChapterIn(groupOf(owner), chapterId, rankForTitle(owner))
-                ?: return@launch
+            val next = library.nextChapterIn(
+                manhwaIds = (groupOf(owner) + state.chapter.manhwaId).distinct(),
+                chapterId = chapterId,
+                rank = rankForTitle(owner),
+            ) ?: return@launch
             val manhwa = container.db.manhwaDao().byId(next.manhwaId) ?: return@launch
             val pages = runCatching { container.reader.pages(next, manhwa) }.getOrNull()
                 ?: return@launch
@@ -1306,7 +1419,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             // The next chapter is looked up in the merged list, so a series that continues on
             // another source keeps going instead of reporting the end of the series.
             val owner = state.ownerManhwaId
-            val next = library.nextChapterIn(groupOf(owner), chapterId, rankForTitle(owner))
+            val next = library.nextChapterIn(
+                manhwaIds = (groupOf(owner) + state.chapter.manhwaId).distinct(),
+                chapterId = chapterId,
+                rank = rankForTitle(owner),
+            )
+            // Resolving the next chapter is asynchronous. If the reader was closed in the
+            // meantime, this must not pop the profile or search that replaced it.
+            if (!isReaderOpen(chapterId)) return@launch
             if (next == null) {
                 _message.value = "You are all caught up"
                 stack.value = stack.value.dropLast(1)
@@ -1322,17 +1442,20 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     // --- downloads --------------------------------------------------------
 
     fun download(chapters: List<ChapterEntity>, manhwa: ManhwaEntity, metered: Boolean) {
+        // External-only chapters are bookmarks to a publisher, not files this worker can fetch.
+        val readable = chapters.filter { it.externalUrl == null }
+        if (readable.isEmpty()) return
         val quality = settings.current.downloadQuality
         askForNotificationsOnce()
         viewModelScope.launch {
-            for (chapter in chapters) {
+            for (chapter in readable) {
                 container.downloads.markQueued(manhwa.id, chapter.id, quality, metered)
             }
-            container.scheduler.enqueue(manhwa, chapters, quality, metered)
-            _message.value = if (chapters.size == 1) {
-                "Downloading ${chapterHeading(chapters.first().numberText)}"
+            container.scheduler.enqueue(manhwa, readable, quality, metered)
+            _message.value = if (readable.size == 1) {
+                "Downloading ${chapterHeading(readable.first().numberText)}"
             } else {
-                "Downloading ${chapters.size} chapters"
+                "Downloading ${readable.size} chapters"
             }
         }
     }

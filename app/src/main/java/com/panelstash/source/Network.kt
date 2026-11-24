@@ -13,6 +13,21 @@ import okhttp3.Response
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
+/**
+ * Android refuses cleartext image loads, so an `http://` artwork URL is a guaranteed failure
+ * rather than a slow one. Every image host these sources use answers HTTPS, so the scheme is
+ * lifted and a protocol-relative path is completed. Local files and `content://` URIs are left
+ * alone.
+ */
+fun httpsImageUrl(url: String): String {
+    val trimmed = url.trim()
+    return when {
+        trimmed.startsWith("//") -> "https:$trimmed"
+        trimmed.startsWith("http://") -> "https://" + trimmed.removePrefix("http://")
+        else -> trimmed
+    }
+}
+
 object Network {
 
     /**
@@ -119,20 +134,14 @@ object Network {
         host.endsWith("kaynscans.com") -> "https://kaynscans.com/"
         // Also covers cdn.flamecomics.xyz, which serves the pages.
         host.endsWith("flamecomics.xyz") -> "https://flamecomics.xyz/"
-        // Weeb Central serves pages and covers from its own storage hosts.
-        host.endsWith("weebcentral.com") -> "https://weebcentral.com/"
-        host.endsWith("planeptune.us") -> "https://weebcentral.com/"
-        host.endsWith("compsci88.com") -> "https://weebcentral.com/"
-        host.endsWith("mangapill.com") -> "https://mangapill.com/"
-        host.endsWith("readdetectiveconan.com") -> "https://mangapill.com/"
         // Arena Scans and Lua Comic serve their pages from their own CDNs.
         host.endsWith("arenascan.com") -> "https://arenascan.com/"
         host.endsWith("luacomic.org") -> "https://luacomic.org/"
-        // Mgeko and the image hosts its reader points at.
+        // Mgeko and the numbered image hosts its reader points at. The number has changed
+        // before, so any imgsrv host is treated as Mgeko's rather than only the current two.
         host.endsWith("mgeko.cc") -> "https://www.mgeko.cc/"
         host.endsWith("mangageko.com") -> "https://www.mgeko.cc/"
-        host.endsWith("imgsrv4.com") -> "https://www.mgeko.cc/"
-        host.endsWith("imgsrv5.com") -> "https://www.mgeko.cc/"
+        host.contains("imgsrv") -> "https://www.mgeko.cc/"
         else -> null
     }
 }

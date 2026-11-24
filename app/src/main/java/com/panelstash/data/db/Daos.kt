@@ -61,8 +61,18 @@ interface ManhwaDao {
     @Update
     suspend fun update(manhwa: ManhwaEntity)
 
+    /** One transaction for a whole catalogue page, instead of one per row. */
+    @Insert
+    suspend fun insertAll(manhwas: List<ManhwaEntity>): List<Long>
+
+    @Update
+    suspend fun updateAll(manhwas: List<ManhwaEntity>)
+
     @Query("SELECT * FROM manhwa WHERE sourceId = :sourceId AND remoteId = :remoteId LIMIT 1")
     suspend fun byRemote(sourceId: String, remoteId: String): ManhwaEntity?
+
+    @Query("SELECT * FROM manhwa WHERE sourceId = :sourceId AND remoteId IN (:remoteIds)")
+    suspend fun byRemotes(sourceId: String, remoteIds: List<String>): List<ManhwaEntity>
 
     @Query("SELECT * FROM manhwa WHERE id = :id LIMIT 1")
     suspend fun byId(id: Long): ManhwaEntity?
@@ -161,14 +171,6 @@ interface ChapterDao {
     @Query("SELECT * FROM chapter WHERE id = :id LIMIT 1")
     suspend fun byId(id: Long): ChapterEntity?
 
-    @Query(
-        """
-        SELECT * FROM chapter WHERE manhwaId = :manhwaId
-        ORDER BY CASE WHEN sortKey IS NULL THEN 1 ELSE 0 END, sortKey ASC, numberText ASC
-        """,
-    )
-    fun observeForManhwa(manhwaId: Long): Flow<List<ChapterEntity>>
-
     /**
      * Every stored chapter of several sources' copies of the same title, as one profile shows
      * them. Collapsing the duplicates is the repository's job, not the query's.
@@ -213,9 +215,6 @@ interface ChapterDao {
 interface ResumeDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun put(resume: ResumeEntity)
-
-    @Query("SELECT * FROM resume WHERE manhwaId = :manhwaId LIMIT 1")
-    fun observe(manhwaId: Long): Flow<ResumeEntity?>
 
     @Query("SELECT * FROM resume WHERE manhwaId = :manhwaId LIMIT 1")
     suspend fun get(manhwaId: Long): ResumeEntity?
@@ -284,9 +283,6 @@ interface DownloadDao {
 
     @Query("SELECT * FROM download WHERE chapterId = :chapterId LIMIT 1")
     fun observeByChapter(chapterId: Long): Flow<DownloadEntity?>
-
-    @Query("SELECT * FROM download WHERE manhwaId = :manhwaId")
-    fun observeForManhwa(manhwaId: Long): Flow<List<DownloadEntity>>
 
     /** Downloads of every source's copy of one title, for the merged chapter list. */
     @Query("SELECT * FROM download WHERE manhwaId IN (:manhwaIds)")

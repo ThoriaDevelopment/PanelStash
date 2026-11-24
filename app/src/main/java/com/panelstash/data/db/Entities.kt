@@ -54,6 +54,8 @@ data class ChapterEntity(
 
 @Entity(
     tableName = "resume",
+    // A chapter deletion cascades into resume; without this index that check scans the table.
+    indices = [Index("chapterId")],
     foreignKeys = [
         ForeignKey(
             entity = ManhwaEntity::class,

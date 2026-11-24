@@ -57,6 +57,10 @@ class MgekoSource(
     @Volatile
     private var cachedGenres: List<SourceGenre>? = null
 
+    /** A linked profile asks for the same detail twice; one fetch answers both. */
+    @Volatile
+    private var cachedDetail: Triple<String, SourceManhwa, Long>? = null
+
     override suspend fun browse(
         sort: BrowseSort,
         tagId: String?,
@@ -104,8 +108,12 @@ class MgekoSource(
     }
 
     override suspend fun manhwa(remoteId: String): SourceManhwa {
+        val now = System.currentTimeMillis()
+        cachedDetail?.let { (id, detail, at) ->
+            if (id == remoteId && now - at < DETAIL_CACHE_MS) return detail
+        }
         val body = request("/manga/$remoteId/") { html() }
-        return parseMgekoSeries(body, remoteId)
+        return parseMgekoSeries(body, remoteId).also { cachedDetail = Triple(remoteId, it, now) }
     }
 
     override suspend fun chapters(manhwaRemoteId: String, language: String): List<SourceChapter> {
@@ -118,7 +126,7 @@ class MgekoSource(
         val body = request("/reader/en/$chapterRemoteId/") { html() }
         val images = parseMgekoPages(body)
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = MGEKO_CDN, images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun request(path: String, configure: HttpRequestBuilder.() -> Unit = { html() }): String =
@@ -158,6 +166,9 @@ class MgekoSource(
     private companion object {
         /** Cards the browse grid lists per page. */
         const val BROWSE_PAGE = 24
+
+        /** Long enough to serve a profile's repeated detail reads, short enough to see edits. */
+        const val DETAIL_CACHE_MS = 60_000L
     }
 }
 

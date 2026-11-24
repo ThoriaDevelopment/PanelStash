@@ -42,10 +42,6 @@ class DownloadStore(
         return File(dir, "%04d.%s".format(index, safe))
     }
 
-    suspend fun record(chapterId: Long): DownloadEntity? = dao.byChapter(chapterId)
-
-    fun observeForManhwa(manhwaId: Long) = dao.observeForManhwa(manhwaId)
-
     /** Downloads of every source's copy of a title, so a merged chapter list shows them all. */
     fun observeForManhwas(manhwaIds: List<Long>) = dao.observeForManhwas(manhwaIds)
 
@@ -78,14 +74,19 @@ class DownloadStore(
     }
 
     suspend fun complete(manhwaId: Long, chapterId: Long, dir: File, bytes: Long, quality: PageQuality) {
-        // Keep the policy the queue was created with rather than rewriting it here.
+        // The row can disappear while the worker is finishing: deleting a running chapter must
+        // not be undone by a late completion writing the record and directory back.
         val existing = dao.byChapter(chapterId)
+        if (existing == null) {
+            dir.deleteRecursively()
+            return
+        }
         dao.put(
             DownloadEntity(
                 chapterId = chapterId,
                 manhwaId = manhwaId,
-                quality = existing?.quality ?: quality.name,
-                meteredAllowed = existing?.meteredAllowed ?: false,
+                quality = existing.quality,
+                meteredAllowed = existing.meteredAllowed,
                 state = DownloadState.COMPLETE,
                 byteSize = bytes,
                 localDir = dir.absolutePath,
@@ -98,12 +99,15 @@ class DownloadStore(
     suspend fun fail(manhwaId: Long, chapterId: Long, dir: File?, quality: PageQuality, error: String) {
         dir?.deleteRecursively()
         val existing = dao.byChapter(chapterId)
+        // A deleted row stays deleted. A cancellation after the reader removed the download must
+        // not recreate it as a failed download.
+        if (existing == null) return
         dao.put(
             DownloadEntity(
                 chapterId = chapterId,
                 manhwaId = manhwaId,
-                quality = existing?.quality ?: quality.name,
-                meteredAllowed = existing?.meteredAllowed ?: false,
+                quality = existing.quality,
+                meteredAllowed = existing.meteredAllowed,
                 state = DownloadState.FAILED,
                 localDir = null,
                 error = error,
@@ -152,13 +156,14 @@ class DownloadStore(
             dir.isDirectory
 
         if (undoable) {
+            val sourceDir = dir
             val target = File(trashDir, chapterId.toString())
             target.deleteRecursively()
             target.parentFile?.mkdirs()
-            if (dir!!.renameTo(target)) {
+            if (sourceDir.renameTo(target)) {
                 pending = Pending(record, target)
             } else {
-                dir.deleteRecursively()
+                sourceDir.deleteRecursively()
             }
         } else {
             dir?.deleteRecursively()

@@ -20,28 +20,6 @@ class AliasMappingTest {
     }
 
     @Test
-    fun `weeb central associated names become aliases`() {
-        val html = """
-            <h1>Solo Leveling</h1>
-            <li>
-              <strong>Associated Name(s)</strong>
-              <ul class="list-disc list-inside">
-                <li>Only I level up</li>
-                <li>Na Honjaman Level-Up</li>
-              </ul>
-            </li>
-        """.trimIndent()
-        val series = parseWeebSeries(html, "01J76XY/Solo-Leveling")
-        assertEquals(listOf("Only I level up", "Na Honjaman Level-Up"), series.aliases)
-    }
-
-    @Test
-    fun `a series without associated names has none`() {
-        val series = parseWeebSeries("<h1>Solo Leveling</h1>", "01J76XY/Solo-Leveling")
-        assertEquals(emptyList<String>(), series.aliases)
-    }
-
-    @Test
     fun `flame alternative titles become aliases`() {
         val series = FlameSeriesDto(
             seriesId = 7,

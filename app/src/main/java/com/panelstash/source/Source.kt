@@ -44,6 +44,17 @@ internal fun aliasList(raw: String?): List<String> = raw.orEmpty()
     .filter { it.isNotEmpty() }
     .distinct()
 
+/** Decodes the entities scan sites put in titles, chapter labels and genre names. */
+internal fun unescapeHtml(text: String): String = text
+    .replace("&quot;", "\"")
+    .replace("&#039;", "'")
+    .replace("&#39;", "'")
+    .replace("&#x27;", "'")
+    .replace("&apos;", "'")
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&amp;", "&")
+
 /** A chapter as delivered by a source. */
 data class SourceChapter(
     val remoteId: String,
@@ -71,7 +82,6 @@ data class PageImage(
 )
 
 data class PageSet(
-    val baseUrl: String,
     val images: List<PageImage>,
 )
 

@@ -6,9 +6,11 @@ import com.panelstash.source.BrowseSort
 import com.panelstash.source.Source
 import com.panelstash.source.SourceGenre
 import com.panelstash.source.StatusFilter
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 
 /** One poster in a rail, with the small print that explains where it came from. */
 data class DiscoveryCard(
@@ -226,7 +228,7 @@ class DiscoveryRepository(private val library: LibraryRepository) {
         for (vote in votes) {
             // One page per source that files this genre under the same name.
             val pages = filterable.mapNotNull { source ->
-                val genre = runCatching { source.genres() }.getOrNull()
+                val genre = runCatching { withContext(Dispatchers.IO) { source.genres() } }.getOrNull()
                     .orEmpty()
                     .firstOrNull { genreKey(it.name) == genreKey(vote.name) }
                     ?: return@mapNotNull null
@@ -284,7 +286,9 @@ class DiscoveryRepository(private val library: LibraryRepository) {
             val reports = source != null &&
                 (source.capabilities.titleGenres || source.capabilities.genres)
             val genres = if (reports) {
-                runCatching { source?.manhwa(seed.remoteId) }.getOrNull()?.genres.orEmpty()
+                runCatching {
+                    withContext(Dispatchers.IO) { source.manhwa(seed.remoteId) }
+                }.getOrNull()?.genres.orEmpty()
             } else {
                 emptyList()
             }
@@ -353,7 +357,9 @@ class DiscoveryRepository(private val library: LibraryRepository) {
         if (!source.capabilities.genres) {
             null
         } else {
-            runCatching { source.manhwa(seed.remoteId) }.getOrNull()?.genres?.firstOrNull()
+            runCatching {
+                withContext(Dispatchers.IO) { source.manhwa(seed.remoteId) }
+            }.getOrNull()?.genres?.firstOrNull()
         }
 
     private fun statusOf(seed: ManhwaEntity, source: Source): StatusFilter {

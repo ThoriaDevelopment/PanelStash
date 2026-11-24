@@ -131,7 +131,7 @@ class FlameComicsSource(
         val images = flamePageImages(seriesId, token, chapter.images)
         // A chapter whose pages the site has pulled renders empty, which is terminal here.
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = FLAME_CDN, images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun catalogue(): List<FlameSeriesDto> {

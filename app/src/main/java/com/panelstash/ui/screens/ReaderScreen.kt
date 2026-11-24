@@ -582,14 +582,16 @@ private fun RetryingAsyncImage(
     onSuccess: (AsyncImagePainter.State.Success) -> Unit = {},
 ) {
     var failures by remember(request) { mutableIntStateOf(0) }
-    var retrying by remember(request) { mutableStateOf(false) }
-    LaunchedEffect(request, retrying) {
-        if (!retrying) return@LaunchedEffect
-        retrying = false
+    var retry by remember(request) { mutableStateOf(false) }
+    LaunchedEffect(request, retry) {
+        if (!retry) return@LaunchedEffect
         if (failures >= IMAGE_RETRIES) return@LaunchedEffect
         // 400 ms, 800 ms, 1.6 s: long enough for a rate limit or a dropped connection to clear,
-        // short enough that a reader who stops on the page sees it fill in.
+        // short enough that a reader who stops on the page sees it fill in. The flag is cleared
+        // only after the wait: clearing it first changes this effect's key and cancels the
+        // delay, which is why the old retry loop never actually issued a second request.
         delay(400L shl failures)
+        retry = false
         failures++
     }
     // A new composition is what re-issues the request: Coil caches successes, never failures, so
@@ -603,7 +605,9 @@ private fun RetryingAsyncImage(
             onState = { state ->
                 when (state) {
                     is AsyncImagePainter.State.Success -> onSuccess(state)
-                    is AsyncImagePainter.State.Error -> retrying = true
+                    is AsyncImagePainter.State.Error -> {
+                        if (failures < IMAGE_RETRIES) retry = true
+                    }
                     else -> Unit
                 }
             },

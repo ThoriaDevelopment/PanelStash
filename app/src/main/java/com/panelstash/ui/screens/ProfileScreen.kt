@@ -1,5 +1,6 @@
 package com.panelstash.ui.screens
 
+import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,11 +46,13 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
 import com.panelstash.data.db.ChapterEntity
 import com.panelstash.data.db.DownloadEntity
 import com.panelstash.data.db.DownloadState
+import com.panelstash.source.httpsImageUrl
 import com.panelstash.ui.AppViewModel
 import com.panelstash.ui.ChapterLoad
 import com.panelstash.ui.Chip
@@ -125,6 +129,14 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     // The profile is the owner of every chapter it opens, including ones merged in from another
     // source, so reading across sources keeps one resume point and one Library entry.
     fun openChapter(chapter: ChapterEntity, page: Int = 0) {
+        // A licensed chapter is a bookmark to a publisher's reader. Opening it in this reader
+        // could only fail, so hand it to the browser instead.
+        val external = chapter.externalUrl
+        if (external != null) {
+            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, external.toUri())) }
+                .onFailure { vm.showMessage("Could not open external chapter") }
+            return
+        }
         vm.openChapter(chapter.id, page, manhwaId)
     }
 
@@ -142,23 +154,25 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     val chapterLoad = if (load?.manhwaId == manhwaId) load else null
 
     fun queueDownload(chapters: List<ChapterEntity>) {
-        if (chapters.isEmpty() || current == null) return
+        val readable = chapters.filter { it.externalUrl == null }
+        if (readable.isEmpty() || current == null) return
         // The queue's own policy decides whether a phone connection is enough. When it is not,
         // this asks once, for this request only.
         if (preferences.unmeteredOnly && isMetered(context)) {
-            pendingDownload = chapters
+            pendingDownload = readable
         } else {
-            vm.download(chapters, current.manhwa, metered = !preferences.unmeteredOnly)
+            vm.download(readable, current.manhwa, metered = !preferences.unmeteredOnly)
         }
     }
 
     /** A long queue is confirmed once, with the space it has to fit in, before anything starts. */
     fun startDownload(chapters: List<ChapterEntity>) {
-        if (chapters.isEmpty() || current == null) return
-        if (chapters.size > BATCH_CONFIRM_ABOVE) {
-            pendingBatch = chapters
+        val readable = chapters.filter { it.externalUrl == null }
+        if (readable.isEmpty() || current == null) return
+        if (readable.size > BATCH_CONFIRM_ABOVE) {
+            pendingBatch = readable
         } else {
-            queueDownload(chapters)
+            queueDownload(readable)
         }
     }
 
@@ -208,8 +222,13 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
     }
 
     // The title moves into the bar only once the hero has scrolled away, so it is never on
-    // screen twice and the bar still says where the reader is.
-    val heroScrolled = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0
+    // screen twice and the bar still says where the reader is. Derived state keeps the scroll
+    // position from recomposing the entire profile on every pixel.
+    val heroScrolled by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         TopBar(
@@ -520,7 +539,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                         EmptyState(
                             glyph = Glyph.Refresh,
                             title = "Chapters did not load",
-                            message = chapterLoad?.error,
+                            message = chapterLoad.error,
                             actionText = "Try again",
                             onAction = { vm.refreshChapters(manhwaId) },
                         )
@@ -552,6 +571,7 @@ fun ProfileScreen(vm: AppViewModel, manhwaId: Long) {
                             sourceName = if (spansSources) vm.sourceName(chapter.sourceId) else null,
                             isResumePoint = chapter.id == current.resumeChapterId,
                             download = current.downloads[chapter.id],
+                            downloadable = chapter.externalUrl == null,
                             onOpen = {
                                 val page = if (chapter.id == current.resumeChapterId) current.resumePage else 0
                                 openChapter(chapter, page)
@@ -757,7 +777,7 @@ private fun Backdrop(url: String, modifier: Modifier = Modifier) {
     var loaded by remember(url) { mutableStateOf(false) }
     Box(modifier) {
         AsyncImage(
-            model = url,
+            model = httpsImageUrl(url),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             onState = { state -> loaded = state is AsyncImagePainter.State.Success },
@@ -810,6 +830,7 @@ private fun ChapterCard(
     sourceName: String? = null,
     isResumePoint: Boolean,
     download: DownloadEntity?,
+    downloadable: Boolean,
     onOpen: () -> Unit,
     onToggleRead: () -> Unit,
     onDownload: () -> Unit,
@@ -890,6 +911,8 @@ private fun ChapterCard(
             Spacer(Modifier.width(8.dp))
 
             when {
+                download == null && !downloadable -> Eyebrow("EXTERNAL", color = Palette.InkTertiary)
+
                 download == null -> IconButton(
                     glyph = Glyph.Download,
                     onClick = onDownload,

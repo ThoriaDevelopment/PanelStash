@@ -25,8 +25,6 @@ class SourceRegistry(
             return everything.filterNot { it.id in off }.ifEmpty { everything }
         }
 
-    val default: Source = requireNotNull(sources.firstOrNull()) { "At least one source is required" }
-
     fun get(sourceId: String): Source =
         byId[sourceId] ?: throw SourceError.Unavailable(IllegalStateException("Unknown source $sourceId"))
 

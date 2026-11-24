@@ -108,7 +108,7 @@ class LuaComicSource(
             ?: throw SourceError.Unavailable()
         val images = parseLuaPages(body, slug)
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = LUA_CDN, images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun seriesDetail(slug: String): LuaSeriesDetailDto {

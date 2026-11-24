@@ -58,7 +58,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -100,7 +103,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import coil3.compose.AsyncImage
 import coil3.compose.AsyncImagePainter
+import com.panelstash.source.httpsImageUrl
 import com.panelstash.ui.theme.Palette
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.cos
 import kotlin.math.sin
@@ -891,6 +896,9 @@ fun Shimmer(modifier: Modifier = Modifier, shape: androidx.compose.ui.graphics.S
     )
 }
 
+/** Times a cover is asked for again after a failure. */
+private const val COVER_RETRIES = 3
+
 /**
  * Artwork with a designed failure: while it loads a shimmer holds the space, and if it never
  * arrives the space is filled with the title's initials on a tinted panel. A missing cover is
@@ -907,6 +915,20 @@ fun Cover(
 ) {
     var settled by remember(url) { mutableStateOf(false) }
     var failed by remember(url) { mutableStateOf(false) }
+    // A cover that failed once used to stay a monogram until the row was recycled: Coil caches
+    // successes, never failures, and nothing re-issued the request. Deferred retries let a
+    // transient CDN error heal instead of leaving a permanent hole in the grid.
+    var failures by remember(url) { mutableIntStateOf(0) }
+    var retry by remember(url) { mutableStateOf(false) }
+    LaunchedEffect(url, retry) {
+        if (!retry) return@LaunchedEffect
+        if (failures >= COVER_RETRIES) return@LaunchedEffect
+        // 350 ms, 700 ms, 1.4 s. The flag is cleared only after the wait: changing this
+        // effect's key before the delay would cancel it along with the retry.
+        delay(350L shl failures)
+        retry = false
+        failures++
+    }
     Box(
         modifier
             .clip(shape)
@@ -921,19 +943,28 @@ fun Cover(
         contentAlignment = Alignment.Center,
     ) {
         if (url != null && !failed) {
-            AsyncImage(
-                model = url,
-                contentDescription = null,
-                contentScale = contentScale,
-                modifier = Modifier.fillMaxSize(),
-                onState = { state ->
-                    if (state is AsyncImagePainter.State.Success) settled = true
-                    if (state is AsyncImagePainter.State.Error) {
-                        failed = true
-                        settled = true
-                    }
-                },
-            )
+            key(failures) {
+                AsyncImage(
+                    model = httpsImageUrl(url),
+                    contentDescription = null,
+                    contentScale = contentScale,
+                    modifier = Modifier.fillMaxSize(),
+                    onState = { state ->
+                        when (state) {
+                            is AsyncImagePainter.State.Success -> settled = true
+                            is AsyncImagePainter.State.Error -> {
+                                if (failures >= COVER_RETRIES) {
+                                    failed = true
+                                    settled = true
+                                } else {
+                                    retry = true
+                                }
+                            }
+                            else -> Unit
+                        }
+                    },
+                )
+            }
         } else {
             settled = true
         }

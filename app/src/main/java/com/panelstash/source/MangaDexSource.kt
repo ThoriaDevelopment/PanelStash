@@ -97,6 +97,9 @@ internal object MangaDexApi {
     )
 }
 
+/** Long enough to serve a profile's repeated detail reads, short enough to see metadata edits. */
+private const val DETAIL_CACHE_MS = 60_000L
+
 class MangaDexSource(
     private val client: HttpClient,
     private val gate: SourceGate,
@@ -124,6 +127,10 @@ class MangaDexSource(
 
     @Volatile
     private var cachedGenres: List<SourceGenre>? = null
+
+    /** A linked profile asks for the same detail twice; one fetch answers both. */
+    @Volatile
+    private var cachedDetail: Triple<String, SourceManhwa, Long>? = null
 
     override suspend fun browse(
         sort: BrowseSort,
@@ -164,12 +171,16 @@ class MangaDexSource(
     }
 
     override suspend fun manhwa(remoteId: String): SourceManhwa {
+        val now = System.currentTimeMillis()
+        cachedDetail?.let { (id, detail, at) ->
+            if (id == remoteId && now - at < DETAIL_CACHE_MS) return detail
+        }
         val body = request("/manga/$remoteId") {
             parameter("includes[]", "cover_art")
         }
         val dto = Network.json.decodeFromString<MangaDetailResponse>(body).data
             ?: throw SourceError.Unavailable()
-        return dto.toSourceManhwa()
+        return dto.toSourceManhwa().also { cachedDetail = Triple(remoteId, it, now) }
     }
 
     override suspend fun chapters(manhwaRemoteId: String, language: String): List<SourceChapter> {
@@ -233,7 +244,7 @@ class MangaDexSource(
                 url = "${dto.baseUrl}/$apiValue/${dto.chapter.hash}/$fileName",
             )
         }
-        return PageSet(baseUrl = dto.baseUrl, images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun request(path: String, configure: io.ktor.client.request.HttpRequestBuilder.() -> Unit = {}): String {

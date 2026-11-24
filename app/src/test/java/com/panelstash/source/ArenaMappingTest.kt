@@ -1,6 +1,7 @@
 package com.panelstash.source
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -156,6 +157,42 @@ class ArenaMappingTest {
         assertEquals(3, pages.size)
         assertEquals(listOf(0, 1, 2), pages.map { it.index })
         assertEquals("https://cdn.arenascan.com/arena-bucket/320761/425/38734b90fe05.webp", pages.last().url)
+    }
+
+    @Test
+    fun `a related series card and a named promo are not chapter pages`() {
+        val page = reader +
+            """<img src="https://cdn.arenascan.com/arena-bucket/999999/1/cover.webp" />""" +
+            """<img src="https://cdn.arenascan.com/arena-bucket/320761/425/recommendation.webp" />"""
+
+        val pages = parseArenaPages(page)
+
+        assertEquals(3, pages.size)
+        assertTrue(pages.none { it.url.contains("999999") })
+        assertTrue(pages.none { it.url.contains("recommendation") })
+    }
+
+    @Test
+    fun `a short wide trailing image is told apart from a page`() {
+        assertTrue(imageIsWide(webp(800, 364)))
+        assertFalse(imageIsWide(webp(800, 1250)))
+        assertFalse(imageIsWide(ByteArray(0)))
+    }
+
+    /** A minimal lossy WebP header: RIFF/WEBP, the VP8 start code and its two dimensions. */
+    private fun webp(width: Int, height: Int): ByteArray {
+        val bytes = ByteArray(64)
+        "RIFF".toByteArray().copyInto(bytes, 0)
+        "WEBP".toByteArray().copyInto(bytes, 8)
+        "VP8 ".toByteArray().copyInto(bytes, 12)
+        bytes[23] = 0x9d.toByte()
+        bytes[24] = 0x01
+        bytes[25] = 0x2a
+        bytes[26] = (width and 0xff).toByte()
+        bytes[27] = ((width shr 8) and 0x3f).toByte()
+        bytes[28] = (height and 0xff).toByte()
+        bytes[29] = ((height shr 8) and 0x3f).toByte()
+        return bytes
     }
 
     /** The archive's genre filter, cut from /manga/ on 2026-11-10. */

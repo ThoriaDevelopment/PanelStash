@@ -15,11 +15,15 @@ import com.panelstash.source.SourceError
 import com.panelstash.source.SourceGenre
 import com.panelstash.source.SourceManhwa
 import com.panelstash.source.SourceRegistry
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** One aggregate page: what was found, where each source resumes, and whether all are done. */
@@ -45,7 +49,7 @@ private const val CATALOGUE_TTL_MS = 30L * 24 * 60 * 60 * 1000
  * wait for the whole screen — and a site that never answers held Browse for the full 30 s request
  * timeout. A dropped source is not marked finished, so "load more" asks it again.
  */
-private const val LIST_TIMEOUT_MS = 15_000L
+private const val LIST_TIMEOUT_MS = 8_000L
 
 /** The same, for the searches that decide which sources carry an opened title. */
 private const val LINK_SEARCH_TIMEOUT_MS = 8_000L
@@ -128,8 +132,6 @@ class LibraryRepository(
 
     fun observeManhwa(id: Long): Flow<ManhwaEntity?> = manhwaDao.observe(id)
 
-    fun observeChapters(manhwaId: Long): Flow<List<ChapterEntity>> = chapterDao.observeForManhwa(manhwaId)
-
     /**
      * One profile's chapters, across every stored copy of the title. [mergeChapters] collapses a
      * chapter number that several sources publish into the copy the reader should get.
@@ -152,13 +154,17 @@ class LibraryRepository(
      */
     suspend fun search(sourceId: String, query: String, offset: Int, limit: Int): SearchPage {
         val source = sources.get(sourceId)
-        val rows = if (query.isBlank()) {
-            source.browse(discoverySort(source), tagId = null, filter = BrowseFilter.None, offset, limit)
-        } else {
-            source.search(query = query, offset = offset, limit = limit)
+        // Scrapers parse HTML and regexes after the network resumes; that work belongs on IO,
+        // not on the frame the grid is waiting to draw.
+        val rows = withContext(Dispatchers.IO) {
+            if (query.isBlank()) {
+                source.browse(discoverySort(source), tagId = null, filter = BrowseFilter.None, offset, limit)
+            } else {
+                source.search(query = query, offset = offset, limit = limit)
+            }
         }
         return SearchPage(
-            items = rows.mapNotNull { upsert(it, source.id) },
+            items = storeRows(rows, source.id),
             nextOffsets = mapOf(source.id to offset + rows.size),
             exhausted = rows.size < limit,
         )
@@ -171,32 +177,63 @@ class LibraryRepository(
      * Results are interleaved by rank, so "All sources" is one merged list rather than thirty
      * rows from whichever site happens to come first in the registry.
      */
-    suspend fun searchAll(query: String, offsets: Map<String, Int>, limit: Int): SearchPage = coroutineScope {
-        val pages = sources.all.map { source ->
-            val offset = offsets[source.id] ?: 0
-            async {
-                val result = runCatching {
-                    withTimeoutOrNull(LIST_TIMEOUT_MS) {
-                        if (query.isBlank()) {
-                            source.browse(discoverySort(source), null, BrowseFilter.None, offset, limit)
-                        } else {
-                            source.search(query, offset, limit)
+    suspend fun searchAll(
+        query: String,
+        offsets: Map<String, Int>,
+        limit: Int,
+        /** Called after each source answers, so a search fills in instead of waiting for all. */
+        onPartial: ((List<ManhwaEntity>) -> Unit)? = null,
+    ): SearchPage {
+        val nextOffsets = offsets.toMutableMap()
+        val landed = mutableListOf<Pair<String, List<RankedManhwa>>>()
+        val lock = Mutex()
+        val pages = coroutineScope {
+            sources.all.map { source ->
+                val offset = offsets[source.id] ?: 0
+                async(Dispatchers.IO) {
+                    val result = runCatching {
+                        withTimeoutOrNull(LIST_TIMEOUT_MS) {
+                            if (query.isBlank()) {
+                                source.browse(discoverySort(source), null, BrowseFilter.None, offset, limit)
+                            } else {
+                                source.search(query, offset, limit)
+                            }
+                        } ?: throw SourceError.Transient()
+                    }
+                    val fresh = result.getOrDefault(emptyList())
+                    val counts = fresh.associate { it.remoteId to it.chapterCount }
+                    val rows = storeRows(fresh, source.id)
+                        .map { RankedManhwa(it, counts[it.remoteId]) }
+                    lock.withLock {
+                        if (result.isSuccess) nextOffsets[source.id] = offset + rows.size
+                        landed += source.id to rows
+                        onPartial?.let { publish ->
+                            // Sources answer in whatever order the network gives them, but the
+                            // grid's precedence is registration order, not arrival order.
+                            val current = landed.sortedBy { sourceRank(it.first) }
+                            publish(
+                                interleaveRanked(current, current.sumOf { it.second.size })
+                                    .map { it.second },
+                            )
                         }
-                    } ?: throw SourceError.Transient()
+                    }
+                    Triple(source, offset, result)
                 }
-                Triple(source, offset, result)
-            }
-        }.awaitAll()
+            }.awaitAll()
+        }
 
         val firstError = pages.firstNotNullOfOrNull { it.third.exceptionOrNull() }
-        val nextOffsets = offsets.toMutableMap()
-        val perSource = ranked(pages, nextOffsets)
+        val perSource = landed.sortedBy { sourceRank(it.first) }
         val items = interleaveRanked(perSource, perSource.sumOf { it.second.size }).map { it.second }
         if (items.isEmpty()) firstError?.let { throw it }
-        SearchPage(
+        return SearchPage(
             items = items,
             nextOffsets = nextOffsets,
-            exhausted = pages.all { it.third.getOrDefault(emptyList()).size < limit },
+            // A failed source is not exhausted: load-more must retry it. Treating its empty
+            // result as the end hid the rest of that source's matches.
+            exhausted = pages.all { (_, _, result) ->
+                result.isSuccess && result.getOrDefault(emptyList()).size < limit
+            },
         )
     }
 
@@ -217,47 +254,60 @@ class LibraryRepository(
         filter: BrowseFilter,
         offsets: Map<String, Int>,
         limit: Int,
-    ): BrowsePage = coroutineScope {
-        val pages = sources.all.map { source ->
-            val offset = offsets[source.id] ?: 0
-            async {
-                Triple(
-                    source,
-                    offset,
-                    runCatching {
+        /**
+         * Called after each source answers, with everything that has landed so far. Browse uses
+         * this to draw the first sites immediately rather than holding the whole grid until the
+         * slowest one answers or times out.
+         */
+        onPartial: ((List<ManhwaEntity>) -> Unit)? = null,
+    ): BrowsePage {
+        val nextOffsets = offsets.toMutableMap()
+        // Only touched while holding [lock], and read once after every task has finished.
+        val landed = mutableListOf<Pair<String, List<RankedManhwa>>>()
+        val lock = Mutex()
+        val pages = coroutineScope {
+            sources.all.map { source ->
+                val offset = offsets[source.id] ?: 0
+                async(Dispatchers.IO) {
+                    val result = runCatching {
                         withTimeoutOrNull(LIST_TIMEOUT_MS) {
                             source.browse(sort, tagId, filter, offset, limit)
                         } ?: throw SourceError.Transient()
-                    },
-                )
-            }
-        }.awaitAll()
+                    }
+                    // Rows are stored as each source lands, so a partial page is already
+                    // openable before the rest of the catalogue has answered. The whole page
+                    // is one insert/update transaction rather than three queries per row.
+                    val fresh = result.getOrDefault(emptyList())
+                    val counts = fresh.associate { it.remoteId to it.chapterCount }
+                    val rows = storeRows(fresh, source.id)
+                        .map { RankedManhwa(it, counts[it.remoteId]) }
+                    lock.withLock {
+                        if (result.isSuccess) nextOffsets[source.id] = offset + rows.size
+                        landed += source.id to rows
+                        onPartial?.let { publish ->
+                            // Sources answer in whatever order the network gives them, but the
+                            // grid's precedence is registration order, not arrival order.
+                            val current = landed.sortedBy { sourceRank(it.first) }
+                            publish(
+                                interleaveRanked(current, current.sumOf { it.second.size })
+                                    .map { it.second },
+                            )
+                        }
+                    }
+                    Triple(source, offset, result)
+                }
+            }.awaitAll()
+        }
 
         val firstError = pages.firstNotNullOfOrNull { it.third.exceptionOrNull() }
-        val nextOffsets = offsets.toMutableMap()
         val exhausted = pages.all { (_, _, result) ->
             result.isSuccess && result.getOrDefault(emptyList()).size < limit
         }
         // Interleaved by rank: with every source selected, a page must not be one site's list.
-        val perSource = ranked(pages, nextOffsets)
+        val perSource = landed.sortedBy { sourceRank(it.first) }
         val items = interleaveRanked(perSource, perSource.sumOf { it.second.size }).map { it.second }
         if (items.isEmpty()) firstError?.let { throw it }
-        BrowsePage(items = items, nextOffsets = nextOffsets, exhausted = exhausted)
-    }
-
-    /**
-     * Stores an aggregate page's rows and keeps the chapter count each source reported, so the
-     * merge can prefer the complete copy of a title two sites both publish.
-     */
-    private suspend fun ranked(
-        pages: List<Triple<Source, Int, Result<List<SourceManhwa>>>>,
-        nextOffsets: MutableMap<String, Int>,
-    ): List<Pair<String, List<RankedManhwa>>> = pages.map { (source, offset, result) ->
-        val rows = result.getOrDefault(emptyList())
-        if (result.isSuccess) nextOffsets[source.id] = offset + rows.size
-        source.id to rows.mapNotNull { fresh ->
-            upsert(fresh, source.id)?.let { RankedManhwa(it, fresh.chapterCount) }
-        }
+        return BrowsePage(items = items, nextOffsets = nextOffsets, exhausted = exhausted)
     }
 
     /** A page of the browse catalogue, stored locally so it can be opened straight away. */
@@ -270,10 +320,13 @@ class LibraryRepository(
         limit: Int,
     ): List<ManhwaEntity> {
         val source = sources.get(sourceId)
-        return source.browse(sort, tagId, filter, offset, limit).mapNotNull { upsert(it, source.id) }
+        return withContext(Dispatchers.IO) {
+            storeRows(source.browse(sort, tagId, filter, offset, limit), source.id)
+        }
     }
 
-    suspend fun genres(sourceId: String): List<SourceGenre> = sources.get(sourceId).genres()
+    suspend fun genres(sourceId: String): List<SourceGenre> =
+        withContext(Dispatchers.IO) { sources.get(sourceId).genres() }
 
     suspend fun manhwa(manhwaId: Long): ManhwaEntity? = manhwaDao.byId(manhwaId)
 
@@ -314,7 +367,9 @@ class LibraryRepository(
             for (source in sources.all) {
                 if (source.id in excluding) continue
                 val candidates = runCatching {
-                    withTimeoutOrNull(LINK_SEARCH_TIMEOUT_MS) { source.search(title, 0, 20) }
+                    withTimeoutOrNull(LINK_SEARCH_TIMEOUT_MS) {
+                        withContext(Dispatchers.IO) { source.search(title, 0, 20) }
+                    }
                 }.getOrNull().orEmpty()
                 // Only the same title counts. A source's search happily returns a spin-off for
                 // its parent, so a partial match would open "Solo Leveling: Arise" in place of
@@ -347,7 +402,7 @@ class LibraryRepository(
         sources.all
             .filter { it.id !in excluding }
             .map { source ->
-                async {
+                async(Dispatchers.IO) {
                     // The site's own search is the way in; the alternates are what make a hit on
                     // a differently-titled copy count as the same series.
                     val candidates = runCatching {
@@ -372,8 +427,22 @@ class LibraryRepository(
     /** Loads a manhwa from its source and refreshes its chapter list. Returns the local id. */
     suspend fun openManhwa(sourceId: String, remoteId: String): Long {
         val source = sources.get(sourceId)
-        val fresh = source.manhwa(remoteId)
+        val fresh = withContext(Dispatchers.IO) { source.manhwa(remoteId) }
         val stored = upsert(fresh, source.id) ?: error("Could not store manhwa $remoteId")
+        refreshChapters(stored.id)
+        return stored.id
+    }
+
+    /**
+     * Stores a copy of a title that a source search already found, then fills in its chapters.
+     *
+     * A merged profile opens every sibling copy just to add its chapters, and the search row
+     * already carries the title and cover. Skipping the detail page halves the requests spent on
+     * each linked source, which is the difference between a profile filling in over one round of
+     * calls and two.
+     */
+    suspend fun openLinked(source: Source, listing: SourceManhwa): Long? {
+        val stored = upsert(listing, source.id) ?: return null
         refreshChapters(stored.id)
         return stored.id
     }
@@ -382,7 +451,9 @@ class LibraryRepository(
     suspend fun refreshChapters(manhwaId: Long): Int {
         val manhwa = manhwaDao.byId(manhwaId) ?: return 0
         val source = sources.get(manhwa.sourceId)
-        val chapters = source.chapters(manhwa.remoteId, language = "en")
+        val chapters = withContext(Dispatchers.IO) {
+            source.chapters(manhwa.remoteId, language = "en")
+        }
         val now = System.currentTimeMillis()
         // Read the stored rows once and write the differences in two batches. A per-chapter
         // lookup plus a per-chapter insert is two hundred transactions for a two-hundred-chapter
@@ -477,8 +548,6 @@ class LibraryRepository(
     suspend fun pruneCatalogue(olderThanMs: Long = CATALOGUE_TTL_MS): Int =
         manhwaDao.pruneUnused(System.currentTimeMillis() - olderThanMs)
 
-    suspend fun firstChapter(manhwaId: Long): ChapterEntity? = chapterDao.firstChapter(manhwaId)
-
     /** The next readable chapter in reading order, or null at the end of a series. */
     suspend fun nextChapter(manhwaId: Long, chapterId: Long): ChapterEntity? {
         val all = chapterDao.listForManhwa(manhwaId).filter { it.externalUrl == null }
@@ -496,10 +565,23 @@ class LibraryRepository(
         /** The title's source order, so a pinned source continues to win the next chapter too. */
         rank: (String) -> Int = { sourceRank(it) },
     ): ChapterEntity? {
+        val current = chapterDao.byId(chapterId) ?: return null
         val merged = mergeChapters(chapterDao.listForManhwas(manhwaIds), rank)
             .filter { it.externalUrl == null }
-        val index = merged.indexOfFirst { it.id == chapterId }
-        return if (index >= 0 && index + 1 < merged.size) merged[index + 1] else null
+        val exact = merged.indexOfFirst { it.id == chapterId }
+        if (exact >= 0) return merged.getOrNull(exact + 1)
+        // The profile lists one copy of each chapter number, and it is not always the copy the
+        // reader opened: the fallback that rescued a dead chapter, or a pinned-source change,
+        // can leave the reader on a row the merged list has replaced. Continue from that
+        // chapter's place in the reading order instead of from its id, so a series with two
+        // sources still advances instead of claiming it has ended.
+        val sameNumber = merged.indexOfFirst {
+            it.numberText.trim() == current.numberText.trim() && it.sortKey == current.sortKey
+        }
+        if (sameNumber >= 0) return merged.getOrNull(sameNumber + 1)
+        // The row is not in this group at all; the first chapter that sorts after it is still
+        // the right answer.
+        return merged.firstOrNull { CHAPTER_ORDER.compare(it, current) > 0 }
     }
 
     /**
@@ -546,35 +628,57 @@ class LibraryRepository(
         return first to 0
     }
 
-    private suspend fun upsert(source: SourceManhwa, sourceId: String): ManhwaEntity? {
-        val existing = manhwaDao.byRemote(sourceId, source.remoteId)
+    /**
+     * Stores one source's page of rows with a handful of queries instead of three per row.
+     * Browse asks a dozen sources at once and stores up to thirty rows each; once the network
+     * answered, the per-row lookup/write/lookup was the dominant cost of showing a page.
+     */
+    private suspend fun storeRows(rows: List<SourceManhwa>, sourceId: String): List<ManhwaEntity> {
+        if (rows.isEmpty()) return emptyList()
         val now = System.currentTimeMillis()
-        return if (existing == null) {
-            val id = manhwaDao.insert(
-                ManhwaEntity(
+        val unique = rows.distinctBy { it.remoteId }
+        val existing = manhwaDao.byRemotes(sourceId, unique.map { it.remoteId })
+            .associateBy { it.remoteId }
+        val inserts = mutableListOf<ManhwaEntity>()
+        val updates = mutableListOf<ManhwaEntity>()
+        for (fresh in unique) {
+            val held = existing[fresh.remoteId]
+            if (held == null) {
+                inserts += ManhwaEntity(
                     sourceId = sourceId,
-                    remoteId = source.remoteId,
-                    title = source.title,
-                    description = source.description,
-                    coverUrl = source.coverUrl,
-                    year = source.year,
-                    status = source.status,
+                    remoteId = fresh.remoteId,
+                    title = fresh.title,
+                    description = fresh.description,
+                    coverUrl = fresh.coverUrl,
+                    year = fresh.year,
+                    status = fresh.status,
                     lastFetchedAt = now,
-                ),
-            )
-            manhwaDao.byId(id)
-        } else {
-            manhwaDao.update(
-                existing.copy(
-                    title = source.title,
-                    description = source.description ?: existing.description,
-                    coverUrl = source.coverUrl ?: existing.coverUrl,
-                    year = source.year ?: existing.year,
-                    status = source.status ?: existing.status,
+                )
+            } else {
+                updates += held.copy(
+                    title = fresh.title,
+                    description = fresh.description ?: held.description,
+                    coverUrl = fresh.coverUrl ?: held.coverUrl,
+                    year = fresh.year ?: held.year,
+                    status = fresh.status ?: held.status,
                     lastFetchedAt = now,
-                ),
-            )
-            manhwaDao.byId(existing.id)
+                )
+            }
         }
+        // Inserted ids come back in the same order as the list, so a new row is addressed by
+        // the id it was given without a second SELECT.
+        val insertedIds = if (inserts.isEmpty()) emptyList() else manhwaDao.insertAll(inserts)
+        if (updates.isNotEmpty()) manhwaDao.updateAll(updates)
+        val byRemote = LinkedHashMap<String, ManhwaEntity>(unique.size)
+        existing.forEach { (remoteId, row) -> byRemote[remoteId] = row }
+        inserts.forEachIndexed { index, row ->
+            val id = insertedIds.getOrNull(index) ?: return@forEachIndexed
+            byRemote[row.remoteId] = row.copy(id = id)
+        }
+        updates.forEach { row -> byRemote[row.remoteId] = row }
+        return unique.mapNotNull { byRemote[it.remoteId] }
     }
+
+    private suspend fun upsert(source: SourceManhwa, sourceId: String): ManhwaEntity? =
+        storeRows(listOf(source), sourceId).firstOrNull()
 }

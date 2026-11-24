@@ -17,7 +17,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ReadLaterEntity::class,
         DownloadEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class PanelStashDatabase : RoomDatabase() {
@@ -48,6 +48,13 @@ abstract class PanelStashDatabase : RoomDatabase() {
             }
         }
 
+        /** Indexes the resume foreign key so chapter cleanup does not scan every resume row. */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_resume_chapterId ON resume(chapterId)")
+            }
+        }
+
         @Volatile
         private var instance: PanelStashDatabase? = null
 
@@ -58,7 +65,7 @@ abstract class PanelStashDatabase : RoomDatabase() {
                     PanelStashDatabase::class.java,
                     "panelstash.db",
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                     .addCallback(object : Callback() {
                         /**
                          * A destructive fallback drops every row, which leaves the downloaded

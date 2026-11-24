@@ -46,6 +46,10 @@ class NyxScansSource(
     /** Politeness: undocumented API, so stay well under a request every 250ms. */
     private val limiter = RateLimiter(250)
 
+    /** A linked profile asks for the same detail twice; one fetch answers both. */
+    @Volatile
+    private var cachedDetail: Triple<String, SourceManhwa, Long>? = null
+
     override suspend fun browse(
         sort: BrowseSort,
         tagId: String?,
@@ -76,9 +80,13 @@ class NyxScansSource(
     override suspend fun genres(): List<SourceGenre> = emptyList()
 
     override suspend fun manhwa(remoteId: String): SourceManhwa {
+        val now = System.currentTimeMillis()
+        cachedDetail?.let { (id, detail, at) ->
+            if (id == remoteId && now - at < DETAIL_CACHE_MS) return detail
+        }
         val body = request("/api/post") { parameter("postSlug", slugOf(remoteId)) }
         val dto = decode(NyxPostDetail.serializer(), body).post ?: throw SourceError.Unavailable()
-        return dto.toSourceManhwa()
+        return dto.toSourceManhwa().also { cachedDetail = Triple(remoteId, it, now) }
     }
 
     override suspend fun chapters(manhwaRemoteId: String, language: String): List<SourceChapter> {
@@ -108,7 +116,7 @@ class NyxScansSource(
                 PageImage(index = index, url = image.url, width = image.width, height = image.height)
             }
         if (images.isEmpty()) throw SourceError.Unavailable()
-        return PageSet(baseUrl = images.first().url.substringBefore("/upload/"), images = images)
+        return PageSet(images = images)
     }
 
     private suspend fun request(
@@ -154,6 +162,9 @@ class NyxScansSource(
     private companion object {
         const val BASE = "https://api.nyxscans.com"
         const val SEPARATOR = "|"
+
+        /** Long enough to serve a profile's repeated detail reads, short enough to see edits. */
+        const val DETAIL_CACHE_MS = 60_000L
 
         fun idOf(remoteId: String): String = remoteId.substringBefore(SEPARATOR)
 
